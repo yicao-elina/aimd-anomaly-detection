@@ -329,6 +329,286 @@ def inject_metrics_bar(metrics: list) -> None:
 <div class="mb-strip">{cards}</div>"""
     components.html(html, height=110, scrolling=False)
 
+
+def inject_feature_table(df: pd.DataFrame, title: str = '', height: int = 560) -> None:
+    """
+    Render an interactive, visualized feature-comparison table via components.html().
+
+    Columns: Feature | AIMD mean±σ | Upload mean | Z-score bar | Δ%
+    Features:
+      - Inline horizontal z-score bar (left=negative, right=positive, severity-colored)
+      - Click-to-sort on every column
+      - Live filter/search input
+      - Row severity tinting (coral/gold/sage) based on |z|
+      - Fully matches the warm cream theme (DM Serif Display + DM Mono + DM Sans)
+    """
+    if df is None or df.empty:
+        st.info("Feature statistics are not yet available.")
+        return
+
+    # Ensure numeric types
+    for col in ['aimd_mean', 'mlff_mean', 'aimd_std', 'z_score', 'relative_change_%']:
+        if col in df.columns:
+            df = df.copy()
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    max_z = max(float(df['z_score'].abs().max()), 1.0) if 'z_score' in df.columns else 10.0
+
+    def _sev(z):
+        az = abs(z)
+        if az > 5:  return CORAL
+        if az > 2:  return GOLD
+        return SAGE
+
+    def _sev_cls(z):
+        az = abs(z)
+        if az > 5:  return 'sev-high'
+        if az > 2:  return 'sev-mid'
+        return 'sev-low'
+
+    def _z_bar(z):
+        az = abs(z)
+        pct = min(az / max_z * 100, 100)
+        c = _sev(z)
+        # Positive z: bar grows right; negative: bar grows left
+        if z >= 0:
+            bar = (f"<div class='zb-pos' style='width:{pct:.1f}%;background:{c}66;"
+                   f"border-right:2px solid {c}'></div>")
+        else:
+            bar = (f"<div class='zb-neg' style='width:{pct:.1f}%;background:{c}66;"
+                   f"border-left:2px solid {c}'></div>")
+        label_color = c
+        label = f"{z:+.2f}" if abs(z) < 1000 else f"{z:+.0f}"
+        return (f"<div class='z-bar-wrap'>"
+                f"  <div class='z-bar-track'><div class='z-bar-center'></div>{bar}</div>"
+                f"  <span class='z-label' style='color:{label_color}'>{label}</span>"
+                f"</div>")
+
+    def _delta_badge(d):
+        c = _sev(d / 20)  # scale: ±100% → 5σ equivalent for color
+        txt = f"{d:+,.0f}%" if abs(d) >= 1000 else f"{d:+.1f}%"
+        return f"<span class='delta-badge' style='color:{c};border-color:{c}40'>{txt}</span>"
+
+    # Sort by |z| descending by default
+    df_sorted = df.reindex(df['z_score'].abs().sort_values(ascending=False).index) \
+        if 'z_score' in df.columns else df
+
+    uid = str(abs(hash(title + str(len(df)))))[:8]
+
+    rows_html = ''
+    for _, row in df_sorted.iterrows():
+        feat  = str(row.get('feature', ''))
+        am    = float(row.get('aimd_mean', 0))
+        as_   = float(row.get('aimd_std', 0))
+        mm    = float(row.get('mlff_mean', 0))
+        z     = float(row.get('z_score', 0))
+        delta = float(row.get('relative_change_%', 0))
+        sev   = _sev_cls(z)
+        sc    = _sev(z)
+        mm_fmt = f"{mm:.4f}" if abs(mm) < 1e4 else f"{mm:,.1f}"
+        am_fmt = f"{am:.4f}" if abs(am) < 1e4 else f"{am:,.4f}"
+        rows_html += (
+            f"<tr class='ft-row {sev}' data-feat='{feat.lower()}' data-z='{z:.4f}'>"
+            f"<td class='td-feat'><span class='feat-name'>{feat}</span></td>"
+            f"<td class='td-num'><span class='val-main'>{am_fmt}</span>"
+            f"<span class='val-std'>±{as_:.4f}</span></td>"
+            f"<td class='td-num'><span class='val-main' style='color:{sc}'>{mm_fmt}</span></td>"
+            f"<td class='td-bar'>{_z_bar(z)}</td>"
+            f"<td class='td-delta'>{_delta_badge(delta)}</td>"
+            f"</tr>"
+        )
+
+    title_html = f"<div class='ft-title'>{title}</div>" if title else ''
+
+    html = f"""
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: {BG}; }}
+  .ft-wrap {{
+    font-family: 'DM Sans', sans-serif;
+    background: {BG};
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid {BORDER_C};
+  }}
+  {title_html and f".ft-title {{font-family:'DM Serif Display',serif;font-size:1.1rem;color:{INK};padding:16px 20px 0;}}"}
+  .ft-controls {{
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px; border-bottom: 1px solid {BORDER_C};
+    background: {SURFACE};
+  }}
+  .ft-search-input {{
+    flex: 1; font-family: 'DM Mono', monospace; font-size: 11px;
+    padding: 6px 12px; border: 1px solid {BORDER_C}; border-radius: 6px;
+    background: {SURFACE2}; color: {TEXT}; outline: none;
+    letter-spacing: .03em;
+    transition: border-color .2s;
+  }}
+  .ft-search-input:focus {{ border-color: {CORAL}; }}
+  .ft-hint {{
+    font-family: 'DM Mono', monospace; font-size: 9px;
+    letter-spacing: .12em; color: {MUTED}; text-transform: uppercase;
+    white-space: nowrap;
+  }}
+  .ft-table {{
+    width: 100%; border-collapse: collapse;
+    font-size: 12px; table-layout: fixed;
+  }}
+  .ft-table thead {{
+    background: {SURFACE}; position: sticky; top: 0; z-index: 2;
+  }}
+  .ft-table th {{
+    font-family: 'DM Mono', monospace; font-size: 9px;
+    letter-spacing: .12em; text-transform: uppercase;
+    color: {MUTED}; padding: 10px 12px; text-align: left;
+    border-bottom: 2px solid {BORDER_C};
+    cursor: pointer; user-select: none;
+    transition: color .15s;
+  }}
+  .ft-table th:hover {{ color: {CORAL}; }}
+  .ft-table th.sorted {{ color: {CORAL}; }}
+  .ft-table th:nth-child(1) {{ width: 22%; }}
+  .ft-table th:nth-child(2) {{ width: 20%; }}
+  .ft-table th:nth-child(3) {{ width: 16%; }}
+  .ft-table th:nth-child(4) {{ width: 28%; }}
+  .ft-table th:nth-child(5) {{ width: 14%; }}
+  .ft-row {{ border-bottom: 1px solid {BORDER_C}; transition: background .12s; }}
+  .ft-row:hover {{ background: {SURFACE} !important; }}
+  .ft-row.sev-high {{ background: rgba(224,92,58,.04); }}
+  .ft-row.sev-mid  {{ background: rgba(200,160,80,.04); }}
+  .ft-row.sev-low  {{ background: {BG}; }}
+  .ft-table td {{ padding: 9px 12px; vertical-align: middle; }}
+  .td-feat .feat-name {{
+    font-family: 'DM Mono', monospace; font-size: 11px;
+    color: {INK}; letter-spacing: .02em;
+  }}
+  .td-num {{ text-align: right; }}
+  .val-main {{
+    font-family: 'DM Mono', monospace; font-size: 11px;
+    color: {TEXT}; display: block;
+  }}
+  .val-std {{
+    font-family: 'DM Mono', monospace; font-size: 9px;
+    color: {MUTED}; display: block; margin-top: 1px;
+  }}
+  /* Z-score bar */
+  .z-bar-wrap {{
+    display: flex; align-items: center; gap: 8px;
+  }}
+  .z-bar-track {{
+    flex: 1; height: 14px; background: {SURFACE2};
+    border-radius: 3px; overflow: hidden; position: relative;
+  }}
+  .z-bar-center {{
+    position: absolute; left: 50%; top: 0; bottom: 0;
+    width: 1px; background: {BORDER_C}; z-index: 1;
+  }}
+  .zb-pos {{
+    position: absolute; left: 50%; top: 1px; bottom: 1px;
+    border-radius: 0 2px 2px 0;
+    transition: width .4s ease;
+  }}
+  .zb-neg {{
+    position: absolute; right: 50%; top: 1px; bottom: 1px;
+    border-radius: 2px 0 0 2px;
+    transition: width .4s ease;
+  }}
+  .z-label {{
+    font-family: 'DM Mono', monospace; font-size: 10px;
+    font-weight: 500; min-width: 52px; text-align: right;
+    letter-spacing: .02em;
+  }}
+  /* Δ% badge */
+  .td-delta {{ text-align: right; }}
+  .delta-badge {{
+    font-family: 'DM Mono', monospace; font-size: 10px;
+    padding: 2px 7px; border-radius: 4px; border: 1px solid;
+    display: inline-block;
+  }}
+  /* empty state */
+  .ft-empty {{
+    padding: 24px; text-align: center;
+    font-family: 'DM Mono', monospace; font-size: 11px;
+    color: {MUTED}; letter-spacing: .08em;
+  }}
+  /* scrollable body */
+  .ft-scroll {{ max-height: {height - 90}px; overflow-y: auto; }}
+  .ft-scroll::-webkit-scrollbar {{ width: 6px; }}
+  .ft-scroll::-webkit-scrollbar-track {{ background: {SURFACE2}; }}
+  .ft-scroll::-webkit-scrollbar-thumb {{ background: {BORDER_C}; border-radius: 3px; }}
+</style>
+
+<div class="ft-wrap">
+  {title_html}
+  <div class="ft-controls">
+    <input class="ft-search-input" id="fts-{uid}" type="text"
+           placeholder="Filter features…" oninput="ftFilter('{uid}', this.value)" />
+    <span class="ft-hint">↕ click header to sort · {len(df)} features</span>
+  </div>
+  <div class="ft-scroll">
+    <table class="ft-table" id="ft-{uid}">
+      <thead><tr>
+        <th onclick="ftSort('{uid}',0,false)">Feature ↕</th>
+        <th onclick="ftSort('{uid}',1,true)">AIMD mean ± σ ↕</th>
+        <th onclick="ftSort('{uid}',2,true)">Upload mean ↕</th>
+        <th onclick="ftSort('{uid}',3,true)" class="sorted">Z-score ↓</th>
+        <th onclick="ftSort('{uid}',4,true)">Δ% ↕</th>
+      </tr></thead>
+      <tbody id="ftb-{uid}">{rows_html}</tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function() {{
+  var _asc = {{}};
+
+  window.ftFilter = function(uid, q) {{
+    q = q.toLowerCase();
+    document.querySelectorAll('#ftb-' + uid + ' tr').forEach(function(r) {{
+      r.style.display = (r.dataset.feat || '').includes(q) ? '' : 'none';
+    }});
+  }};
+
+  window.ftSort = function(uid, col, numeric) {{
+    var tbody = document.getElementById('ftb-' + uid);
+    if (!tbody) return;
+    var rows = Array.from(tbody.querySelectorAll('tr'));
+    var asc = !_asc[uid + col];
+    _asc[uid + col] = asc;
+
+    // Update header highlight
+    var ths = document.querySelectorAll('#ft-' + uid + ' thead th');
+    ths.forEach(function(th) {{ th.classList.remove('sorted'); }});
+    if (ths[col]) ths[col].classList.add('sorted');
+
+    rows.sort(function(a, b) {{
+      var av, bv;
+      if (col === 3) {{
+        av = parseFloat(a.dataset.z || 0);
+        bv = parseFloat(b.dataset.z || 0);
+        // Sort by abs z descending by default
+        if (!_asc[uid + col + '_init']) {{
+          _asc[uid + col + '_init'] = true;
+          return Math.abs(bv) - Math.abs(av);
+        }}
+        return asc ? av - bv : bv - av;
+      }}
+      av = (a.cells[col] ? a.cells[col].textContent : '').trim().replace(/[+±%,]/g,'');
+      bv = (b.cells[col] ? b.cells[col].textContent : '').trim().replace(/[+±%,]/g,'');
+      var an = parseFloat(av), bn = parseFloat(bv);
+      if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+      return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+    }});
+    rows.forEach(function(r) {{ tbody.appendChild(r); }});
+  }};
+}})();
+</script>
+"""
+    components.html(html, height=height, scrolling=False)
+
+
 # ── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AIMD Anomaly Detection",
@@ -1124,22 +1404,7 @@ elif page == "🔍 Feature Analysis":
 
     with tab4:
         st.subheader(f"Feature Statistics: AIMD vs {upload_name}")
-        if feat_cmp.empty:
-            st.info("Feature statistics are unavailable for this dataset.")
-        else:
-            max_z = float(feat_cmp['z_score'].abs().max()) if len(feat_cmp) > 0 else 10
-            vmax  = max(10, min(max_z, 1e4))
-            try:
-                styled = (
-                    feat_cmp.style
-                    .background_gradient(subset=['z_score'], cmap='RdBu_r', vmin=-vmax, vmax=vmax)
-                    .format({'aimd_mean':'{:.4f}','mlff_mean':'{:.4f}',
-                             'aimd_std':'{:.4f}','z_score':'{:+.2f}',
-                             'relative_change_%':'{:+.1f}%'})
-                )
-                st.dataframe(styled, use_container_width=True)
-            except Exception:
-                st.dataframe(feat_cmp, use_container_width=True)
+        inject_feature_table(feat_cmp, height=540)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1431,19 +1696,8 @@ elif page == "⚖️ AIMD vs Upload":
 
     # Full table
     st.subheader("Full Feature Comparison Table")
-    st.caption(f"Live comparison: AIMD baseline vs {upload_name}")
-    vmax2 = max(10, min(float(feat_cmp['z_score'].abs().max()), 1e4))
-    try:
-        st.dataframe(
-            feat_cmp.style
-                .background_gradient(subset=['z_score'], cmap='RdBu_r', vmin=-vmax2, vmax=vmax2)
-                .format({'aimd_mean':'{:.4f}','mlff_mean':'{:.4f}',
-                         'aimd_std':'{:.4f}','z_score':'{:+.2f}',
-                         'relative_change_%':'{:+.1f}%'}),
-            use_container_width=True,
-        )
-    except Exception:
-        st.dataframe(feat_cmp, use_container_width=True)
+    st.caption(f"Live comparison: AIMD baseline vs {upload_name} · sorted by |z-score|, click headers to re-sort")
+    inject_feature_table(feat_cmp, height=580)
 
     st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
 
