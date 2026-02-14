@@ -1454,12 +1454,23 @@ elif page == "⚠️ Anomaly Detection":
     fig_tl, ax_tl = mpl_fig(figsize=(14, 3.5))
     ax_tl = fig_tl.axes[0]
     conf = res_sel['confidence']
+    anom = res_sel['anomaly_label']
+    
+    # Safety check: ensure conf and anom match X length
+    if len(conf) != n_win or len(anom) != n_win:
+        st.warning(
+            f"⚠️ Data shape mismatch: X has {n_win} windows, but results has "
+            f"{len(conf)} confidence and {len(anom)} labels. Using first {n_win} elements."
+        )
+        conf = conf[:n_win]
+        anom = anom[:n_win]
+    
     ax_tl.fill_between(range(n_win), conf, alpha=0.25, color=color_sel)
     ax_tl.plot(conf, lw=0.8, color=color_sel)
     ax_tl.axhline(2, color=RED, ls='--', lw=1.5, label='Anomaly threshold (≥2/3 detectors)')
     ax_tl.set_ylim(-0.15, 3.5)
     ax_tl.legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=9)
-    rate_pct = np.mean(res_sel['anomaly_label'])
+    rate_pct = np.mean(anom)
     _style_ax(ax_tl,
               title=f'{src_label} — Anomaly confidence  ({rate_pct:.1%} anomalous)',
               xlabel='Window index', ylabel='Detector votes (0–3)')
@@ -1483,7 +1494,7 @@ elif page == "⚠️ Anomaly Detection":
     w_end = min(w_end + 1, n_win)
 
     with zoom_c2:
-        anom_in_range = float(np.mean(res_sel['anomaly_label'][w_start:w_end]))
+        anom_in_range = float(np.mean(anom[w_start:w_end]))
         st.metric("Windows", w_end - w_start)
         st.metric("Rate in range", f"{anom_in_range:.1%}")
 
@@ -1492,8 +1503,8 @@ elif page == "⚠️ Anomaly Detection":
                                   sharex=True, facecolor=SURFACE,
                                   constrained_layout=True)
     idx    = np.arange(w_start, w_end)
-    conf_z = res_sel['confidence'][w_start:w_end]
-    anom_z = res_sel['anomaly_label'][w_start:w_end]
+    conf_z = conf[w_start:w_end]
+    anom_z = anom[w_start:w_end]
 
     for ax in axes_z: _style_ax(ax)
 
@@ -1508,10 +1519,13 @@ elif page == "⚠️ Anomaly Detection":
               title=f'Zoomed: windows {w_start}–{w_end-1}  |  anomaly rate: {np.mean(anom_z):.1%}',
               ylabel='Detector votes')
 
+    l1_flag = res_sel['l1_flag'][:n_win]
+    l2_if_flag = res_sel['l2_if_flag'][:n_win]
+    l2_svm_flag = res_sel['l2_svm_flag'][:n_win]
     flags = np.vstack([
-        res_sel['l1_flag'][w_start:w_end],
-        res_sel['l2_if_flag'][w_start:w_end],
-        res_sel['l2_svm_flag'][w_start:w_end],
+        l2_svm_flag[w_start:w_end],
+        l2_if_flag[w_start:w_end],
+        l1_flag[w_start:w_end],
     ]).astype(float)
     from matplotlib.colors import LinearSegmentedColormap
     cm_flags = LinearSegmentedColormap.from_list('dark_red', [SURFACE2, RED])

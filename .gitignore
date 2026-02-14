@@ -49,6 +49,10 @@ results/models/*.pt
 *.log
 streamlit_session_*.json
 
+# ── Claude Code local settings (may contain tokens) ─────────────────────────
+.claude/settings.local.json
+.claude/
+
 # ── Transcript / session dumps ───────────────────────────────────────────────
 2026-*.txt
 *.jsonl
