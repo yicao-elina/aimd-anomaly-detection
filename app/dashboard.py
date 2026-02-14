@@ -29,6 +29,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -1323,43 +1324,336 @@ elif page == "🔍 Feature Analysis":
     )
 
     with tab1:
-        p = FIGURES_DIR / 'feature_distributions.png'
-        if p.exists():
-            st.image(str(p), use_container_width=True)
-            st.caption("Static figure from original pipeline. Use Interactive Explorer below for uploaded dataset.")
-        else:
-            st.info("Run pipeline to generate this figure.")
+        # ── Feature glossary / info button ───────────────────────────────────
+        _FEAT_GLOSSARY = {
+            "Displacement statistics": {
+                "features": ["disp_mean","disp_std","disp_skew","disp_kurtosis","disp_max","disp_median","disp_p95"],
+                "description": (
+                    "Per-frame atomic displacement from the reference position, aggregated over all atoms in the window. "
+                    "**mean/median/max/p95** measure how far atoms move on average, at typical values, at extremes. "
+                    "**std** captures spread — high std means some atoms are stationary while others move a lot. "
+                    "**skew/kurtosis** reveal distributional asymmetry (tail behavior): large positive kurtosis = rare extreme events."
+                ),
+            },
+            "Dynamics": {
+                "features": ["rms_velocity","crest_factor","impulse_factor","frame_variance","anisotropy"],
+                "description": (
+                    "**rms_velocity** = root-mean-square of per-atom velocity (energy proxy). "
+                    "**crest_factor** = peak / RMS — detects abrupt velocity spikes (shocks). "
+                    "**impulse_factor** = peak / mean — another spike metric, common in vibration analysis. "
+                    "**frame_variance** = variance of mean displacement across consecutive frames (trajectory smoothness). "
+                    "**anisotropy** = ratio of max-axis to min-axis displacement variance — detects directional bias."
+                ),
+            },
+            "Frequency domain": {
+                "features": ["dominant_freq","spectral_entropy","spectral_peak_ratio"],
+                "description": (
+                    "FFT applied to the displacement time-series within each window. "
+                    "**dominant_freq** = frequency with most energy — captures characteristic oscillation rate. "
+                    "**spectral_entropy** = Shannon entropy of the power spectrum — high entropy = broadband noise, "
+                    "low entropy = clean oscillations. "
+                    "**spectral_peak_ratio** = power at dominant_freq / total power — how 'peaked' the spectrum is."
+                ),
+            },
+            "Mean Squared Displacement": {
+                "features": ["msd_mean","msd_std","msd_final","msd_slope"],
+                "description": (
+                    "MSD(τ) = ⟨|r(t+τ) − r(t)|²⟩ — the standard metric for atomic diffusion. "
+                    "**msd_final** = MSD at the end of the window (total diffusion). "
+                    "**msd_slope** = linear fit slope ≈ 6D (diffusion coefficient × 6). "
+                    "**msd_mean/std** characterize the MSD curve shape. "
+                    "For normal DFT dynamics, MSD grows slowly; catastrophic MLFF drift shows explosive MSD growth."
+                ),
+            },
+            "Energy": {
+                "features": ["energy_mean","energy_std","energy_trend"],
+                "description": (
+                    "Total energy per frame from the .xyz file comment line. "
+                    "**energy_mean** = average energy over the window (should be stable in equilibrium MD). "
+                    "**energy_std** = energy fluctuations (thermodynamic: proportional to heat capacity). "
+                    "**energy_trend** = linear slope of energy vs time — non-zero trend indicates drift / "
+                    "non-equilibrium behavior or force-field instability."
+                ),
+            },
+        }
 
-        # Live comparison for active upload
-        st.subheader(f"Live — AIMD vs {upload_name}")
-        n_show = st.slider("Features to show", 6, 22, 12)
-        # Select top-N by z-score magnitude
-        top_feat_idx = feat_cmp.head(n_show)['feature'].apply(
-            lambda fn: feature_names.index(fn) if fn in feature_names else -1
-        ).tolist()
-        top_feat_idx = [i for i in top_feat_idx if i >= 0]
+        with st.expander("ℹ️ Feature Glossary — what do these metrics measure?", expanded=False):
+            for cat, info in _FEAT_GLOSSARY.items():
+                st.markdown(f"**{cat}**")
+                st.markdown(info["description"])
+                st.caption("Features: " + " · ".join(f"`{f}`" for f in info["features"]))
+                st.markdown("---")
+
+        st.markdown(
+            "<div style='font-family:DM Mono,monospace;font-size:10px;letter-spacing:.12em;"
+            f"color:{MUTED};text-transform:uppercase;margin-bottom:8px'>"
+            f"Live comparison · AIMD baseline ({len(X_aimd)} windows) vs "
+            f"{upload_name} ({len(X_mlff)} windows) · sorted by |z-score|</div>",
+            unsafe_allow_html=True,
+        )
+
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 3])
+        with col_ctrl1:
+            n_show = st.slider("Features to show", 5, 22, 12, key="dist_n_show")
+        with col_ctrl2:
+            chart_mode = st.radio("Chart type", ["📊 Mean ± std bars", "🎻 Violin distributions"],
+                                  horizontal=False, key="dist_mode")
+        with col_ctrl3:
+            use_log = st.toggle("Log scale (x-axis)", value=False, key="dist_log")
+            normalize = st.toggle("Z-score normalize (compare shapes)", value=False, key="dist_norm")
+
+        # Select top-N features by |z-score|
+        top_feats = feat_cmp.head(n_show)['feature'].tolist()
+        top_feat_idx = [feature_names.index(fn) for fn in top_feats if fn in feature_names]
+
         if not top_feat_idx or X_aimd.size == 0 or X_mlff.size == 0:
             st.info("Not enough feature data to plot the live comparison yet.")
         else:
-            fig_v, axes_v = mpl_fig(figsize=(14, max(4, n_show * 0.55)))
-            ax_v = fig_v.axes[0]
-            x_pos = np.arange(len(top_feat_idx))
-            w = 0.36
-            aimd_m = np.nanmean(X_aimd[:, top_feat_idx], axis=0)
-            mlff_m = np.nanmean(X_mlff[:, top_feat_idx], axis=0)
-            aimd_s = np.nanstd(X_aimd[:, top_feat_idx], axis=0)
-            mlff_s = np.nanstd(X_mlff[:, top_feat_idx], axis=0)
+            # Per-feature category lookup for color accent
+            _CAT_COLOR = {
+                **{f: SAGE for f in ["disp_mean","disp_std","disp_skew","disp_kurtosis",
+                                      "disp_max","disp_median","disp_p95"]},
+                **{f: CORAL for f in ["rms_velocity","crest_factor","impulse_factor",
+                                       "frame_variance","anisotropy"]},
+                **{f: GOLD for f in ["dominant_freq","spectral_entropy","spectral_peak_ratio"]},
+                **{f: '#7C5CBF' for f in ["msd_mean","msd_std","msd_final","msd_slope"]},
+                **{f: '#C07050' for f in ["energy_mean","energy_std","energy_trend"]},
+            }
 
-            ax_v.barh(x_pos + w/2, aimd_m, w, xerr=aimd_s, color=CYAN,
-                      alpha=0.75, label='AIMD', error_kw=dict(ecolor=MUTED, lw=1))
-            ax_v.barh(x_pos - w/2, mlff_m, w, xerr=mlff_s, color=RED,
-                      alpha=0.75, label=upload_name[:20], error_kw=dict(ecolor=MUTED, lw=1))
-            ax_v.set_yticks(x_pos)
-            ax_v.set_yticklabels([feature_names[i] for i in top_feat_idx], fontsize=8, color=SUB)
-            ax_v.legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=9)
-            _style_ax(ax_v, title='Feature means ± std: AIMD vs Upload (top by z-score)',
-                      xlabel='Feature value')
-            st.pyplot(fig_v, use_container_width=True); plt.close(fig_v)
+            # Build per-feature description for hover
+            _FEAT_DESC = {}
+            for cat, info in _FEAT_GLOSSARY.items():
+                for f in info["features"]:
+                    _FEAT_DESC[f] = info["description"][:120] + "…"
+
+            feat_labels = [feature_names[i] for i in top_feat_idx]
+            aimd_mat = X_aimd[:, top_feat_idx].copy().astype(float)
+            mlff_mat = X_mlff[:, top_feat_idx].copy().astype(float)
+
+            if normalize:
+                for j in range(len(top_feat_idx)):
+                    mu = np.nanmean(aimd_mat[:, j])
+                    sg = np.nanstd(aimd_mat[:, j]) + 1e-10
+                    aimd_mat[:, j] = (aimd_mat[:, j] - mu) / sg
+                    mlff_mat[:, j] = (mlff_mat[:, j] - mu) / sg
+
+            if chart_mode == "📊 Mean ± std bars":
+                aimd_m = np.nanmean(aimd_mat, axis=0)
+                mlff_m = np.nanmean(mlff_mat, axis=0)
+                aimd_s = np.nanstd(aimd_mat, axis=0)
+                mlff_s = np.nanstd(mlff_mat, axis=0)
+
+                # Get z-scores for each feature
+                z_vals = []
+                for fn in feat_labels:
+                    row = feat_cmp[feat_cmp['feature'] == fn]
+                    z_vals.append(float(row['z_score'].iloc[0]) if len(row) else 0.0)
+
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    name='AIMD (baseline)',
+                    y=feat_labels,
+                    x=aimd_m,
+                    error_x=dict(type='data', array=aimd_s, visible=True,
+                                 color=MUTED, thickness=1.5, width=4),
+                    orientation='h',
+                    marker=dict(color=SAGE, opacity=0.82,
+                                line=dict(color=SAGE, width=0)),
+                    customdata=np.column_stack([aimd_m, aimd_s,
+                                                [len(X_aimd)]*len(feat_labels),
+                                                [_FEAT_DESC.get(f, '') for f in feat_labels],
+                                                z_vals]),
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "AIMD mean: <b>%{customdata[0]:.5g}</b><br>"
+                        "AIMD std:  %{customdata[1]:.4g}<br>"
+                        "Windows:   %{customdata[2]}<br>"
+                        "Z-score:   %{customdata[4]:+.2f}<br>"
+                        "<i style='color:#9C8D7F'>%{customdata[3]}</i>"
+                        "<extra>AIMD baseline</extra>"
+                    ),
+                ))
+                fig.add_trace(go.Bar(
+                    name=upload_name[:28],
+                    y=feat_labels,
+                    x=mlff_m,
+                    error_x=dict(type='data', array=mlff_s, visible=True,
+                                 color=MUTED, thickness=1.5, width=4),
+                    orientation='h',
+                    marker=dict(color=CORAL, opacity=0.82,
+                                line=dict(color=CORAL, width=0)),
+                    customdata=np.column_stack([mlff_m, mlff_s,
+                                                [len(X_mlff)]*len(feat_labels),
+                                                [_FEAT_DESC.get(f, '') for f in feat_labels],
+                                                z_vals]),
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        f"{upload_name[:24]} mean: <b>%{{customdata[0]:.5g}}</b><br>"
+                        "std:     %{customdata[1]:.4g}<br>"
+                        "Windows: %{customdata[2]}<br>"
+                        "Z-score vs AIMD: <b>%{customdata[4]:+.2f}</b><br>"
+                        "<i style='color:#9C8D7F'>%{customdata[3]}</i>"
+                        "<extra>Upload</extra>"
+                    ),
+                ))
+                fig.update_layout(
+                    barmode='group',
+                    title=dict(
+                        text=f"Feature means ± std — AIMD vs {upload_name[:30]}",
+                        font=dict(family="DM Serif Display, serif", size=16, color=INK),
+                        x=0.02,
+                    ),
+                    xaxis=dict(
+                        title="Feature value" + (" (log)" if use_log else "") + (" [z-normalized]" if normalize else ""),
+                        type='log' if use_log else 'linear',
+                        gridcolor=BORDER_C, gridwidth=0.8,
+                        tickfont=dict(family="DM Mono, monospace", size=10, color=SUB),
+                        titlefont=dict(family="DM Sans, sans-serif", size=11, color=SUB),
+                    ),
+                    yaxis=dict(
+                        tickfont=dict(family="DM Mono, monospace", size=10, color=INK),
+                        gridcolor=BORDER_C, gridwidth=0.5,
+                    ),
+                    legend=dict(
+                        font=dict(family="DM Sans, sans-serif", size=11, color=TEXT),
+                        bgcolor=SURFACE, bordercolor=BORDER_C, borderwidth=1,
+                        x=0.78, y=0.02,
+                    ),
+                    paper_bgcolor=BG,
+                    plot_bgcolor=SURFACE2,
+                    height=max(340, n_show * 42),
+                    margin=dict(l=10, r=20, t=50, b=40),
+                    hoverlabel=dict(
+                        bgcolor=SURFACE,
+                        bordercolor=BORDER_C,
+                        font=dict(family="DM Sans, sans-serif", size=12, color=TEXT),
+                    ),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            else:  # Violin
+                fig = go.Figure()
+                for j, (fi, fn) in enumerate(zip(top_feat_idx, feat_labels)):
+                    av = aimd_mat[:, j]; av = av[~np.isnan(av)]
+                    mv = mlff_mat[:, j]; mv = mv[~np.isnan(mv)]
+                    row = feat_cmp[feat_cmp['feature'] == fn]
+                    z = float(row['z_score'].iloc[0]) if len(row) else 0.0
+                    desc = _FEAT_DESC.get(fn, '')
+
+                    fig.add_trace(go.Violin(
+                        y=av, x=[fn]*len(av),
+                        name='AIMD', legendgroup='AIMD', showlegend=(j == 0),
+                        side='negative', line_color=SAGE,
+                        fillcolor=SAGE + '44', opacity=0.75,
+                        box_visible=True, meanline_visible=True,
+                        hovertemplate=(
+                            f"<b>{fn}</b> — AIMD<br>"
+                            f"n={len(av)} windows<br>"
+                            f"mean={np.mean(av):.4g}  std={np.std(av):.4g}<br>"
+                            f"Z-score vs upload: {z:+.2f}<br>"
+                            f"<i style='color:#9C8D7F'>{desc[:100]}…</i>"
+                            "<extra>AIMD</extra>"
+                        ),
+                    ))
+                    fig.add_trace(go.Violin(
+                        y=mv, x=[fn]*len(mv),
+                        name=upload_name[:20], legendgroup='upload', showlegend=(j == 0),
+                        side='positive', line_color=CORAL,
+                        fillcolor=CORAL + '44', opacity=0.75,
+                        box_visible=True, meanline_visible=True,
+                        hovertemplate=(
+                            f"<b>{fn}</b> — {upload_name[:20]}<br>"
+                            f"n={len(mv)} windows<br>"
+                            f"mean={np.mean(mv):.4g}  std={np.std(mv):.4g}<br>"
+                            f"Z-score vs AIMD: <b>{z:+.2f}</b><br>"
+                            f"<i style='color:#9C8D7F'>{desc[:100]}…</i>"
+                            "<extra>Upload</extra>"
+                        ),
+                    ))
+                fig.update_layout(
+                    violinmode='overlay',
+                    title=dict(
+                        text=f"Feature distributions (violin) — AIMD vs {upload_name[:30]}",
+                        font=dict(family="DM Serif Display, serif", size=16, color=INK),
+                        x=0.02,
+                    ),
+                    xaxis=dict(tickfont=dict(family="DM Mono, monospace", size=9, color=INK),
+                               gridcolor=BORDER_C),
+                    yaxis=dict(
+                        title="Feature value" + (" [z-normalized]" if normalize else ""),
+                        type='log' if use_log else 'linear',
+                        gridcolor=BORDER_C,
+                        tickfont=dict(family="DM Mono, monospace", size=10, color=SUB),
+                    ),
+                    legend=dict(font=dict(family="DM Sans, sans-serif", size=11, color=TEXT),
+                                bgcolor=SURFACE, bordercolor=BORDER_C, borderwidth=1),
+                    paper_bgcolor=BG, plot_bgcolor=SURFACE2,
+                    height=max(420, n_show * 38),
+                    margin=dict(l=10, r=20, t=50, b=60),
+                    hoverlabel=dict(bgcolor=SURFACE, bordercolor=BORDER_C,
+                                    font=dict(family="DM Sans, sans-serif", size=12, color=TEXT)),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.caption(
+                "💡 Hover over bars/violins for exact values, std, z-score, and a feature description. "
+                "Toggle **Log scale** when MLFF values are orders-of-magnitude larger than AIMD. "
+                "Toggle **Z-score normalize** to compare distribution shapes on the same scale."
+            )
+
+            st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+
+            # ── LLM Q&A on Feature Analysis ──────────────────────────────────
+            with st.expander("🤖 Ask AI about these features", expanded=False):
+                st.caption(
+                    "Uses your local `glm-5:cloud` model via Ollama to answer questions about "
+                    "the physics, statistics, or anomaly patterns you see above."
+                )
+                feat_q = st.text_area(
+                    "Your question",
+                    placeholder=(
+                        "e.g. 'Why is rms_velocity so much higher in the MLFF trajectory?' "
+                        "or 'What does a high spectral_entropy mean physically?'"
+                    ),
+                    height=80,
+                    key="feat_llm_q",
+                )
+                if st.button("Ask AI", key="feat_llm_btn"):
+                    if not feat_q.strip():
+                        st.warning("Please enter a question first.")
+                    else:
+                        try:
+                            analyst = OllamaAnalyst()
+                            data_ctx = build_data_context(
+                                X_aimd, X_mlff, feature_names, ra, rm, meta_aimd, feat_cmp
+                            )
+                            with st.spinner("Thinking…"):
+                                answer = analyst.mechanism_analysis(feat_q, data_ctx)
+                            lines = answer.split('\n')
+                            out_parts = []
+                            for ln in lines:
+                                if ln.startswith('## '):
+                                    out_parts.append(
+                                        f"<div style='font-family:DM Serif Display,serif;"
+                                        f"font-size:1rem;color:{INK};margin:12px 0 4px;"
+                                        f"font-weight:600'>{ln[3:]}</div>"
+                                    )
+                                elif '► Claim:' in ln or '► Uncertain:' in ln:
+                                    out_parts.append(
+                                        f'<div class="claim-line">🔸 {ln.strip()}</div>'
+                                    )
+                                else:
+                                    out_parts.append(
+                                        f"<p style='color:{SUB};margin:3px 0'>{ln}</p>"
+                                    )
+                            st.markdown(
+                                '<div class="evidence-block">'
+                                + '\n'.join(out_parts)
+                                + '</div>',
+                                unsafe_allow_html=True,
+                            )
+                        except Exception as exc:
+                            st.error(f"Ollama error: {exc}. Make sure `ollama serve` is running with `glm-5:cloud`.")
 
     with tab2:
         c1, c2 = st.columns(2)
