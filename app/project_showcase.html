@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AIMD Anomaly Detection — Project Showcase</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;0,9..144,800;1,9..144,300&family=Space+Mono:wght@400;700&family=Plus+Jakarta+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#040D1E;--surface:#071428;--surface2:#0D1F38;--border:rgba(34,211,238,.12);
+  --cyan:#22D3EE;--amber:#F59E0B;--green:#4ADE80;--red:#F87171;--purple:#A78BFA;
+  --text:#F1F5F9;--muted:#64748B;--sub:#94A3B8;
+  --ff-display:'Fraunces',serif;--ff-mono:'Space Mono',monospace;--ff-body:'Plus Jakarta Sans',sans-serif;
+  --r:8px;--r2:16px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--ff-body);line-height:1.6;overflow-x:hidden}
+
+/* ── GRAIN OVERLAY ── */
+body::before{
+  content:'';position:fixed;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.04'/%3E%3C/svg%3E");
+  opacity:.4;pointer-events:none;z-index:0
+}
+
+/* ── NAV ── */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:1rem 2.5rem;backdrop-filter:blur(20px);
+  background:rgba(4,13,30,.7);border-bottom:1px solid var(--border)}
+.nav-logo{font-family:var(--ff-display);font-size:1.1rem;font-weight:600;
+  background:linear-gradient(135deg,var(--cyan),var(--purple));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.nav-links{display:flex;gap:2rem}
+.nav-links a{color:var(--sub);text-decoration:none;font-size:.85rem;letter-spacing:.05em;
+  transition:color .2s}
+.nav-links a:hover{color:var(--cyan)}
+.nav-cta{background:var(--cyan);color:var(--bg);padding:.45rem 1.1rem;
+  border-radius:20px;font-size:.8rem;font-weight:600;text-decoration:none;
+  transition:opacity .2s;letter-spacing:.03em}
+.nav-cta:hover{opacity:.85}
+
+/* ── HERO ── */
+.hero{position:relative;min-height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;padding:6rem 2rem 3rem;text-align:center;overflow:hidden}
+.hero-grid{
+  position:absolute;inset:0;
+  background-image:
+    linear-gradient(rgba(34,211,238,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34,211,238,.04) 1px, transparent 1px);
+  background-size:60px 60px;mask-image:radial-gradient(ellipse 80% 80% at 50% 50%,black,transparent)}
+.hero-glow{position:absolute;width:600px;height:600px;
+  background:radial-gradient(circle,rgba(34,211,238,.08),transparent 70%);
+  top:50%;left:50%;transform:translate(-50%,-60%);pointer-events:none}
+.hero-tag{display:inline-flex;align-items:center;gap:.5rem;
+  border:1px solid var(--border);border-radius:20px;
+  padding:.3rem .9rem;font-size:.75rem;color:var(--cyan);
+  letter-spacing:.1em;text-transform:uppercase;margin-bottom:1.5rem;
+  background:rgba(34,211,238,.05);animation:fadeUp .6s ease both}
+.hero-tag span{width:6px;height:6px;background:var(--cyan);border-radius:50%;
+  animation:pulse 2s infinite}
+h1{font-family:var(--ff-display);font-size:clamp(2.5rem,6vw,5.5rem);
+  font-weight:800;line-height:1.05;letter-spacing:-.02em;margin-bottom:1.2rem;
+  animation:fadeUp .6s .1s ease both;opacity:0}
+h1 em{font-style:italic;color:var(--cyan)}
+.hero-sub{font-size:clamp(1rem,2vw,1.2rem);color:var(--sub);max-width:600px;
+  margin:0 auto 2.5rem;font-weight:300;animation:fadeUp .6s .2s ease both;opacity:0}
+.hero-btns{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;
+  animation:fadeUp .6s .3s ease both;opacity:0}
+.btn{padding:.7rem 1.6rem;border-radius:8px;font-size:.9rem;font-weight:600;
+  text-decoration:none;transition:all .2s;letter-spacing:.02em;cursor:pointer;border:none}
+.btn-primary{background:var(--cyan);color:var(--bg)}
+.btn-primary:hover{background:#67E8F9;transform:translateY(-1px);box-shadow:0 8px 24px rgba(34,211,238,.3)}
+.btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}
+.btn-outline:hover{border-color:var(--cyan);color:var(--cyan);transform:translateY(-1px)}
+
+/* Waveform animation */
+.waveform{width:min(700px,90vw);height:80px;margin:3rem auto 0;position:relative;
+  animation:fadeUp .6s .4s ease both;opacity:0}
+.waveform svg{width:100%;height:100%}
+.wave-aimd{stroke:var(--green);stroke-width:2;fill:none;opacity:.8}
+.wave-mlff{stroke:var(--red);stroke-width:2;fill:none;opacity:.8}
+.wave-aimd{stroke-dasharray:800;stroke-dashoffset:800;animation:drawLine 2s .8s ease forwards}
+.wave-mlff{stroke-dasharray:800;stroke-dashoffset:800;animation:drawLine 2s 1.2s ease forwards}
+.waveform-labels{display:flex;justify-content:space-between;font-size:.72rem;
+  color:var(--muted);font-family:var(--ff-mono);margin-top:.5rem;padding:0 1rem}
+.wl-aimd{color:var(--green)}.wl-mlff{color:var(--red)}
+
+/* ── STATS BAR ── */
+.stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:var(--border);border:1px solid var(--border);
+  max-width:900px;margin:0 auto;border-radius:var(--r2)}
+.stat{background:var(--surface);padding:1.5rem 1rem;text-align:center;
+  transition:background .2s}
+.stat:first-child{border-radius:var(--r2) 0 0 var(--r2)}
+.stat:last-child{border-radius:0 var(--r2) var(--r2) 0}
+.stat:hover{background:var(--surface2)}
+.stat-num{font-family:var(--ff-display);font-size:2rem;font-weight:800;display:block;
+  line-height:1.1}
+.stat-lbl{font-size:.72rem;color:var(--muted);letter-spacing:.08em;
+  text-transform:uppercase;margin-top:.25rem}
+.stat-num.green{color:var(--green)}
+.stat-num.red{color:var(--red)}
+.stat-num.cyan{color:var(--cyan)}
+.stat-num.amber{color:var(--amber)}
+
+/* ── SECTIONS ── */
+section{padding:5rem 2rem;position:relative;z-index:1;max-width:1100px;margin:0 auto}
+.section-label{font-family:var(--ff-mono);font-size:.72rem;color:var(--cyan);
+  letter-spacing:.15em;text-transform:uppercase;margin-bottom:.75rem}
+.section-title{font-family:var(--ff-display);font-size:clamp(1.8rem,4vw,2.8rem);
+  font-weight:700;line-height:1.15;letter-spacing:-.02em;margin-bottom:1rem}
+.section-desc{color:var(--sub);max-width:580px;font-size:.95rem;margin-bottom:2.5rem}
+
+/* ── DETECTION DRAMA ── */
+.detection-section{max-width:1100px;margin:0 auto;padding:5rem 2rem}
+.detection-split{display:grid;grid-template-columns:1fr 1fr;gap:2rem;align-items:center}
+.detection-bar-wrap{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r2);padding:2rem}
+.bar-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem}
+.bar-name{font-family:var(--ff-mono);font-size:.85rem}
+.bar-pct{font-family:var(--ff-display);font-size:1.4rem;font-weight:800}
+.bar-track{height:10px;background:rgba(255,255,255,.06);border-radius:5px;overflow:hidden;margin-bottom:1.5rem}
+.bar-fill{height:100%;border-radius:5px;width:0;transition:width 1.4s cubic-bezier(.22,1,.36,1)}
+.bar-fill.green{background:linear-gradient(90deg,var(--green),#86efac)}
+.bar-fill.red{background:linear-gradient(90deg,var(--amber),var(--red))}
+.detection-label{font-size:.75rem;color:var(--muted);margin-bottom:2rem}
+.detection-text .section-title{margin-bottom:.75rem}
+.ratio-badge{display:inline-block;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+  color:var(--amber);padding:.3rem .9rem;border-radius:20px;font-family:var(--ff-mono);
+  font-size:.85rem;margin-top:.75rem}
+
+/* ── ARCHITECTURE ── */
+.arch-flow{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;
+  justify-content:center;padding:2rem 0}
+.arch-node{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
+  padding:.7rem 1.1rem;font-size:.78rem;text-align:center;min-width:100px;
+  transition:all .2s;cursor:default}
+.arch-node:hover{border-color:var(--cyan);background:var(--surface2);
+  box-shadow:0 0 20px rgba(34,211,238,.1)}
+.arch-node .node-label{font-family:var(--ff-mono);color:var(--cyan);font-size:.65rem;
+  display:block;margin-bottom:.2rem}
+.arch-node .node-name{font-weight:600;font-size:.8rem}
+.arch-arrow{color:var(--muted);font-size:1.2rem}
+.arch-split{display:flex;flex-direction:column;gap:.5rem}
+.arch-node.l1{border-color:rgba(74,222,128,.3)}
+.arch-node.l2{border-color:rgba(167,139,250,.3)}
+.arch-node.l3{border-color:rgba(245,158,11,.3)}
+.arch-node.final{border-color:var(--cyan);background:rgba(34,211,238,.06)}
+.arch-node.llm{border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.06)}
+
+/* ── FEATURES ── */
+.features-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem}
+.feature-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
+  padding:1.25rem;transition:all .2s}
+.feature-card:hover{transform:translateY(-3px);border-color:var(--cyan);
+  box-shadow:0 8px 30px rgba(34,211,238,.08)}
+.fc-cat{font-family:var(--ff-mono);font-size:.65rem;letter-spacing:.1em;
+  text-transform:uppercase;margin-bottom:.5rem}
+.fc-cat.c1{color:var(--cyan)}.fc-cat.c2{color:var(--green)}
+.fc-cat.c3{color:var(--amber)}.fc-cat.c4{color:var(--purple)}.fc-cat.c5{color:var(--red)}
+.feature-card h4{font-size:.9rem;font-weight:600;margin-bottom:.5rem}
+.feature-tags{display:flex;flex-wrap:wrap;gap:.3rem}
+.ftag{font-family:var(--ff-mono);font-size:.65rem;background:rgba(255,255,255,.04);
+  border:1px solid var(--border);padding:.15rem .4rem;border-radius:4px;color:var(--sub)}
+
+/* ── DASHBOARD PAGES ── */
+.pages-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1.25rem}
+.page-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);
+  padding:1.75rem;transition:all .25s;position:relative;overflow:hidden}
+.page-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--cyan),var(--purple));transform:scaleX(0);
+  transform-origin:left;transition:transform .3s}
+.page-card:hover{transform:translateY(-4px);border-color:rgba(34,211,238,.3);
+  box-shadow:0 12px 40px rgba(0,0,0,.4)}
+.page-card:hover::before{transform:scaleX(1)}
+.page-icon{font-size:1.8rem;margin-bottom:.75rem;display:block}
+.page-card h3{font-family:var(--ff-display);font-size:1.1rem;font-weight:600;margin-bottom:.5rem}
+.page-card p{font-size:.84rem;color:var(--sub);line-height:1.5}
+.page-badge{display:inline-block;margin-top:.75rem;font-size:.7rem;font-family:var(--ff-mono);
+  color:var(--cyan);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.2);
+  padding:.2rem .6rem;border-radius:4px}
+.page-badge.new{color:var(--amber);background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2)}
+
+/* ── LLM ── */
+.llm-demo{background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);
+  padding:2rem;margin-top:1.5rem}
+.llm-query{background:rgba(34,211,238,.05);border:1px solid rgba(34,211,238,.15);
+  border-radius:var(--r);padding:1rem;font-family:var(--ff-mono);font-size:.82rem;
+  color:var(--cyan);margin-bottom:1rem}
+.llm-query::before{content:'USER  ';color:var(--muted);display:block;font-size:.65rem;
+  letter-spacing:.1em;margin-bottom:.3rem}
+.llm-response{font-size:.84rem;color:var(--sub);line-height:1.7}
+.llm-response::before{content:'GLM-5  ';color:var(--purple);display:block;
+  font-family:var(--ff-mono);font-size:.65rem;letter-spacing:.1em;margin-bottom:.3rem}
+.claim-line{margin:.5rem 0;padding:.4rem .75rem;border-left:2px solid var(--amber);
+  background:rgba(245,158,11,.04);border-radius:0 4px 4px 0;font-size:.82rem}
+.claim-line strong{color:var(--amber)}
+
+/* ── QUALCOMM ── */
+.qualcomm-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-top:1.5rem}
+.q-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
+  padding:1.25rem}
+.q-card .q-req{font-family:var(--ff-mono);font-size:.72rem;color:var(--muted);
+  letter-spacing:.08em;text-transform:uppercase;margin-bottom:.4rem}
+.q-card .q-val{font-size:.88rem;color:var(--text)}
+.q-card:hover{border-color:rgba(167,139,250,.3)}
+
+/* ── CODE BLOCK ── */
+.code-wrap{background:#020810;border:1px solid var(--border);border-radius:var(--r);
+  overflow:hidden;margin-top:1rem}
+.code-header{display:flex;align-items:center;justify-content:space-between;
+  padding:.6rem 1rem;background:rgba(255,255,255,.03);border-bottom:1px solid var(--border)}
+.code-dots{display:flex;gap:.4rem}
+.code-dots span{width:10px;height:10px;border-radius:50%}
+.code-dots span:nth-child(1){background:#FF5F57}
+.code-dots span:nth-child(2){background:#FFBD2E}
+.code-dots span:nth-child(3){background:#28C840}
+.code-lang{font-family:var(--ff-mono);font-size:.7rem;color:var(--muted)}
+.code-copy{font-family:var(--ff-mono);font-size:.7rem;color:var(--cyan);cursor:pointer;
+  background:none;border:1px solid rgba(34,211,238,.2);padding:.2rem .5rem;border-radius:4px;
+  transition:all .2s}
+.code-copy:hover{background:rgba(34,211,238,.1)}
+pre{padding:1.25rem;font-family:var(--ff-mono);font-size:.8rem;line-height:1.7;
+  overflow-x:auto;color:#CBD5E1}
+.kw{color:#67E8F9}.cm{color:#4B5563;font-style:italic}
+.str{color:#86EFAC}.pth{color:#C4B5FD}
+
+/* ── FOOTER ── */
+footer{border-top:1px solid var(--border);padding:2.5rem;text-align:center;
+  font-size:.8rem;color:var(--muted);position:relative;z-index:1}
+footer a{color:var(--cyan);text-decoration:none}
+
+/* ── KEYFRAMES ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes drawLine{to{stroke-dashoffset:0}}
+
+/* ── REVEAL ── */
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}
+.reveal.visible{opacity:1;transform:none}
+
+/* ── DIVIDER ── */
+.section-divider{width:100%;height:1px;background:var(--border);margin:0}
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="nav-logo">AIMD · Anomaly Detection</span>
+  <div class="nav-links">
+    <a href="#detection">Results</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#llm">AI Analysis</a>
+    <a href="#run">Run</a>
+  </div>
+  <a href="http://localhost:8501" target="_blank" class="nav-cta">Launch Dashboard →</a>
+</nav>
+
+<!-- ══ HERO ══ -->
+<div class="hero">
+  <div class="hero-grid"></div>
+  <div class="hero-glow"></div>
+
+  <div class="hero-tag"><span></span>Sb₂Te₃ · Cr Dopants · npj 2D Materials 2026</div>
+
+  <h1>Detect the <em>Abnormal</em><br/>in Molecular Dynamics</h1>
+
+  <p class="hero-sub">
+    A three-level ML ensemble that learns normal AIMD physics and flags every deviation —
+    27.9× more sensitive on MLFF trajectories than statistical chance.
+  </p>
+
+  <div class="hero-btns">
+    <a href="http://localhost:8501" target="_blank" class="btn btn-primary">Launch Dashboard</a>
+    <a href="#architecture" class="btn btn-outline">View Architecture</a>
+    <a href="https://github.com" class="btn btn-outline">GitHub</a>
+  </div>
+
+  <div class="waveform">
+    <svg viewBox="0 0 700 80" preserveAspectRatio="none">
+      <!-- AIMD: calm oscillations -->
+      <polyline class="wave-aimd" points="
+        0,40 20,36 40,44 60,38 80,42 100,37 120,43 140,39 160,41 180,38
+        200,43 220,37 240,42 260,38 280,41 300,39 320,43 340,37 360,42
+        380,38 400,41 420,39 440,43 460,37 480,42 500,38 520,41 540,39
+        560,43 580,37 600,42 620,38 640,41 660,39 680,43 700,40"/>
+      <!-- MLFF: erratic spikes -->
+      <polyline class="wave-mlff" points="
+        0,40 15,42 30,15 45,65 60,38 75,10 90,70 105,40 120,5 135,75
+        150,38 165,42 180,12 195,68 210,40 225,8 240,72 255,38 270,44
+        285,6 300,74 315,40 330,38 345,65 360,10 375,70 390,40 405,42
+        420,8 435,72 450,40 465,36 480,68 495,12 510,66 525,40 540,10
+        555,70 570,42 585,36 600,14 615,66 630,40 645,38 660,70 680,8 700,40"/>
+    </svg>
+    <div class="waveform-labels">
+      <span class="wl-aimd">▬ AIMD (normal dynamics)</span>
+      <span class="wl-mlff">▬ MLFF (anomalous)</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══ STATS ══ -->
+<div style="padding:0 2rem 5rem;max-width:900px;margin:0 auto;position:relative;z-index:1">
+  <div class="stats-bar reveal">
+    <div class="stat">
+      <span class="stat-num green" data-target="3.6" data-suffix="%">0%</span>
+      <div class="stat-lbl">AIMD Anomaly Rate</div>
+    </div>
+    <div class="stat">
+      <span class="stat-num red" data-target="100" data-suffix="%">0%</span>
+      <div class="stat-lbl">MLFF Anomaly Rate</div>
+    </div>
+    <div class="stat">
+      <span class="stat-num amber" data-target="22" data-suffix="">0</span>
+      <div class="stat-lbl">Features Extracted</div>
+    </div>
+    <div class="stat">
+      <span class="stat-num cyan" data-target="25054" data-suffix="">0</span>
+      <div class="stat-lbl">Total Frames</div>
+    </div>
+  </div>
+</div>
+
+<div class="section-divider"></div>
+
+<!-- ══ DETECTION DRAMA ══ -->
+<div class="detection-section reveal" id="detection">
+  <div class="detection-split">
+    <div class="detection-text">
+      <div class="section-label">Detection Results</div>
+      <h2 class="section-title">Clean Separation.<br/>Zero Ambiguity.</h2>
+      <p style="color:var(--sub);font-size:.95rem;margin-bottom:1rem">
+        The L1+L2 ensemble achieves near-perfect discrimination between AIMD reference
+        physics and MLFF deviations — trained only on normal data, no anomaly labels needed.
+      </p>
+      <div class="ratio-badge">27.9× detection ratio</div>
+      <p style="color:var(--muted);font-size:.78rem;margin-top:.75rem">
+        MLFF <code style="background:rgba(248,113,113,.1);color:var(--red);padding:.1rem .4rem;border-radius:3px">disp_median = 17.05 Å</code>
+        vs AIMD <code style="background:rgba(74,222,128,.1);color:var(--green);padding:.1rem .4rem;border-radius:3px">0.003 Å</code>
+        · z = +7213
+      </p>
+    </div>
+    <div class="detection-bar-wrap">
+      <div class="bar-label">
+        <span class="bar-name" style="color:var(--green)">AIMD (normal)</span>
+        <span class="bar-pct" style="color:var(--green)">3.6%</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill green" data-width="3.6"></div></div>
+      <div class="detection-label" style="color:var(--muted);font-size:.75rem;font-family:var(--ff-mono)">
+        1,648 windows · L1+L2 ensemble · contamination=5%
+      </div>
+      <div class="bar-label">
+        <span class="bar-name" style="color:var(--red)">MLFF (test)</span>
+        <span class="bar-pct" style="color:var(--red)">100%</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill red" data-width="100"></div></div>
+      <div class="detection-label" style="color:var(--muted);font-size:.75rem;font-family:var(--ff-mono)">
+        799 windows · all 3 detectors agree
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-top:.75rem">
+        <div style="background:rgba(34,211,238,.04);border:1px solid var(--border);border-radius:6px;padding:.7rem;text-align:center">
+          <div style="font-family:var(--ff-mono);font-size:.65rem;color:var(--muted);margin-bottom:.2rem">L1 STAT</div>
+          <div style="font-family:var(--ff-display);font-size:1.1rem;color:var(--cyan)">3σ</div>
+        </div>
+        <div style="background:rgba(167,139,250,.04);border:1px solid var(--border);border-radius:6px;padding:.7rem;text-align:center">
+          <div style="font-family:var(--ff-mono);font-size:.65rem;color:var(--muted);margin-bottom:.2rem">L2a IF</div>
+          <div style="font-family:var(--ff-display);font-size:1.1rem;color:var(--purple)">100T</div>
+        </div>
+        <div style="background:rgba(245,158,11,.04);border:1px solid var(--border);border-radius:6px;padding:.7rem;text-align:center">
+          <div style="font-family:var(--ff-mono);font-size:.65rem;color:var(--muted);margin-bottom:.2rem">L2b SVM</div>
+          <div style="font-family:var(--ff-display);font-size:1.1rem;color:var(--amber)">RBF</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section-divider"></div>
+
+<!-- ══ ARCHITECTURE ══ -->
+<section id="architecture" class="reveal">
+  <div class="section-label">System Design</div>
+  <h2 class="section-title">Three-Level Pipeline</h2>
+  <p class="section-desc">Domain-agnostic by design. Swap the data loader and the same detector works on GPU profiler data, network latency, or any time series.</p>
+
+  <div class="arch-flow">
+    <div class="arch-node">
+      <span class="node-label">Input</span>
+      <div class="node-name">.xyz Files</div>
+      <div style="font-size:.65rem;color:var(--muted);margin-top:.2rem">25,054 frames</div>
+    </div>
+    <span class="arch-arrow">→</span>
+    <div class="arch-node">
+      <span class="node-label">Loader</span>
+      <div class="node-name">TrajectoryLoader</div>
+    </div>
+    <span class="arch-arrow">→</span>
+    <div class="arch-node">
+      <span class="node-label">Features</span>
+      <div class="node-name">FeatureExtractor</div>
+      <div style="font-size:.65rem;color:var(--muted);margin-top:.2rem">22 features · w=50</div>
+    </div>
+    <span class="arch-arrow">→</span>
+    <div class="arch-split">
+      <div class="arch-node l1">
+        <span class="node-label" style="color:var(--green)">Level 1</span>
+        <div class="node-name">Statistical 3σ</div>
+      </div>
+      <div class="arch-node l2">
+        <span class="node-label" style="color:var(--purple)">Level 2a</span>
+        <div class="node-name">Isolation Forest</div>
+      </div>
+      <div class="arch-node l2">
+        <span class="node-label" style="color:var(--purple)">Level 2b</span>
+        <div class="node-name">One-Class SVM</div>
+      </div>
+      <div class="arch-node l3">
+        <span class="node-label" style="color:var(--amber)">Level 3</span>
+        <div class="node-name">LSTM Autoencoder</div>
+      </div>
+    </div>
+    <span class="arch-arrow">→</span>
+    <div class="arch-node final">
+      <span class="node-label">Ensemble</span>
+      <div class="node-name">Majority Vote</div>
+      <div style="font-size:.65rem;color:var(--muted);margin-top:.2rem">≥2 detectors</div>
+    </div>
+    <span class="arch-arrow">→</span>
+    <div class="arch-node llm">
+      <span class="node-label" style="color:var(--purple)">AI Layer</span>
+      <div class="node-name">glm-5:cloud</div>
+      <div style="font-size:.65rem;color:var(--muted);margin-top:.2rem">NL analysis</div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- ══ FEATURES ══ -->
+<section class="reveal">
+  <div class="section-label">Feature Engineering</div>
+  <h2 class="section-title">22 Atom-Agnostic Features</h2>
+  <p class="section-desc">All features aggregate over atoms — automatically handles 80–86 atom systems with no padding or alignment.</p>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="fc-cat c1">Displacement Stats (7)</div>
+      <h4>Statistical Moments</h4>
+      <div class="feature-tags">
+        <span class="ftag">disp_mean</span><span class="ftag">disp_std</span>
+        <span class="ftag">disp_skew</span><span class="ftag">disp_kurtosis</span>
+        <span class="ftag">disp_max</span><span class="ftag">disp_median</span>
+        <span class="ftag">disp_p95</span>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-cat c2">Dynamics (5)</div>
+      <h4>Velocity & Peak Factors</h4>
+      <div class="feature-tags">
+        <span class="ftag">rms_velocity</span><span class="ftag">crest_factor</span>
+        <span class="ftag">impulse_factor</span><span class="ftag">frame_variance</span>
+        <span class="ftag">anisotropy</span>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-cat c3">Frequency Domain (3)</div>
+      <h4>Spectral Features</h4>
+      <div class="feature-tags">
+        <span class="ftag">dominant_freq</span><span class="ftag">spectral_entropy</span>
+        <span class="ftag">spectral_peak_ratio</span>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-cat c4">MSD (4)</div>
+      <h4>Diffusion Metrics</h4>
+      <div class="feature-tags">
+        <span class="ftag">msd_mean</span><span class="ftag">msd_std</span>
+        <span class="ftag">msd_final</span><span class="ftag">msd_slope</span>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-cat c5">Energy (3)</div>
+      <h4>Thermodynamics</h4>
+      <div class="feature-tags">
+        <span class="ftag">energy_mean</span><span class="ftag">energy_std</span>
+        <span class="ftag">energy_trend</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- ══ DASHBOARD ══ -->
+<section id="dashboard" class="reveal">
+  <div class="section-label">Interactive Dashboard</div>
+  <h2 class="section-title">Five Pages, One Story</h2>
+  <p class="section-desc">Built with Streamlit. All pages load from pre-computed results — sub-second response.</p>
+  <div class="pages-grid">
+    <div class="page-card">
+      <span class="page-icon">📊</span>
+      <h3>Data Overview</h3>
+      <p>File inventory with atom counts, temperatures, and configurations. Window distribution charts per trajectory and temperature.</p>
+      <span class="page-badge">13 trajectories · 25K frames</span>
+    </div>
+    <div class="page-card">
+      <span class="page-icon">🔍</span>
+      <h3>Feature Analysis</h3>
+      <p>4-tab explorer: violin distributions, RF importance, correlation heatmap, and an interactive per-feature histogram + time-series view.</p>
+      <span class="page-badge">22 features · z-score live</span>
+    </div>
+    <div class="page-card">
+      <span class="page-icon">⚠️</span>
+      <h3>Anomaly Detection</h3>
+      <p>Confidence timeline with source toggle. Dynamic window zoom: drag a range slider to reveal the per-detector flag heatmap and top deviating features in that region.</p>
+      <span class="page-badge">🔎 Dynamic window zoom</span>
+    </div>
+    <div class="page-card">
+      <span class="page-icon">⚖️</span>
+      <h3>AIMD vs MLFF</h3>
+      <p>Z-score deviation bar chart, side-by-side distributions, full feature comparison table with colour gradient, CSV export.</p>
+      <span class="page-badge">27.9× separation</span>
+    </div>
+    <div class="page-card">
+      <span class="page-icon">🤖</span>
+      <h3>AI Analysis</h3>
+      <p>Type any question in natural language. GLM-5 generates + executes Python code against real data arrays, then provides evidence-grounded mechanism analysis.</p>
+      <span class="page-badge new">NEW · LLM-powered</span>
+    </div>
+  </div>
+  <div style="margin-top:1.5rem;text-align:center">
+    <a href="http://localhost:8501" target="_blank" class="btn btn-primary">Open Dashboard →</a>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- ══ LLM ══ -->
+<section id="llm" class="reveal">
+  <div class="section-label">AI Analysis Layer</div>
+  <h2 class="section-title">Every Claim Backed by Data</h2>
+  <p class="section-desc">glm-5:cloud generates executable Python code, runs it against real arrays, then explains the mechanism using only computed numbers — no fabrication possible.</p>
+  <div class="llm-demo">
+    <div class="llm-query">Why does MLFF show 100% anomaly rate?</div>
+    <div class="llm-response">
+      <strong style="color:var(--purple);display:block;margin-bottom:.75rem">Mechanism Analysis</strong>
+      <div class="claim-line">
+        <strong>► Claim:</strong> MLFF produces displacements ~6000× larger than AIMD
+        <span style="color:var(--muted)"> | Evidence: disp_median AIMD=0.0029, MLFF=17.0522, z=+7212.93</span>
+      </div>
+      <div class="claim-line">
+        <strong>► Claim:</strong> Atoms exhibit runaway diffusion rather than thermal vibration
+        <span style="color:var(--muted)"> | Evidence: msd_slope AIMD=0.0007, MLFF=4.82, z=+183.2</span>
+      </div>
+      <div class="claim-line">
+        <strong>► Claim:</strong> The MLFF force field is operating outside its training domain for Cr₂ configuration
+        <span style="color:var(--muted)"> | Evidence: 100% anomaly rate across all 3 detector types</span>
+      </div>
+      <p style="margin-top:.75rem;font-size:.8rem;color:var(--muted);font-style:italic">
+        All values cited above are computed from real trajectory data in this session.
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- ══ QUALCOMM ══ -->
+<section class="reveal">
+  <div class="section-label">Interview Alignment</div>
+  <h2 class="section-title">Built for Qualcomm HLM</h2>
+  <p class="section-desc">Summer 2026 Intern · HLM game debugging team · 11–14 weeks. Same framework applies to game profiler data — swap the loader, keep the detector.</p>
+  <div class="qualcomm-grid">
+    <div class="q-card">
+      <div class="q-req">AI / Machine Learning</div>
+      <div class="q-val">3-level ensemble: statistical thresholds + Isolation Forest + One-Class SVM + LSTM autoencoder</div>
+    </div>
+    <div class="q-card">
+      <div class="q-req">Large Language Models</div>
+      <div class="q-val">glm-5:cloud via Ollama: NL → code generation → safe execution → evidence-grounded analysis</div>
+    </div>
+    <div class="q-card">
+      <div class="q-req">Python & Frameworks</div>
+      <div class="q-val">PyTorch, scikit-learn, Streamlit, Ollama, pandas, scipy, matplotlib</div>
+    </div>
+    <div class="q-card">
+      <div class="q-req">Debugging Automation</div>
+      <div class="q-val">Anomaly detection IS the debugging automation — same pipeline for GPU profiler, network latency, frame times</div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- ══ RUN ══ -->
+<section id="run" class="reveal">
+  <div class="section-label">Quick Start</div>
+  <h2 class="section-title">Up in Two Commands</h2>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <div class="code-dots"><span></span><span></span><span></span></div>
+      <span class="code-lang">bash</span>
+      <button class="code-copy" onclick="copyCode(this)">copy</button>
+    </div>
+    <pre><span class="cm"># Step 1 — Re-run full pipeline (~2 min)</span>
+<span class="pth">/Users/alina/anaconda3/envs/agentic/bin/python</span> scripts/run_full_pipeline.py
+
+<span class="cm"># Step 2 — Launch dashboard (Ollama must be running for Page 5)</span>
+<span class="pth">/Users/alina/anaconda3/envs/agentic/bin/streamlit</span> run app/dashboard.py
+
+<span class="cm"># Open in browser</span>
+open http://localhost:8501</pre>
+  </div>
+
+  <div style="margin-top:1.25rem;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.2);
+    border-radius:var(--r);padding:1rem;font-size:.82rem;color:var(--sub)">
+    ⚠️  <strong style="color:var(--amber)">conda run is broken</strong> on this machine (libarchive.19.dylib). Always use the full path above.
+    Ollama must be running for the AI Analysis page (Page 5).
+  </div>
+</section>
+
+<footer>
+  <p>AIMD Anomaly Detection · Johns Hopkins University · npj 2D Materials 2026</p>
+  <p style="margin-top:.4rem">
+    <a href="http://localhost:8501">Dashboard</a> ·
+    <a href="skills_playground.html">Skills Playground</a>
+  </p>
+</footer>
+
+<script>
+// ── Counter animation ──
+function animateCounter(el){
+  const target=parseFloat(el.dataset.target);
+  const suffix=el.dataset.suffix||'';
+  const duration=1800;
+  const start=performance.now();
+  function step(now){
+    const t=Math.min((now-start)/duration,1);
+    const ease=1-Math.pow(1-t,4);
+    const val=target*ease;
+    el.textContent=(target>=1000?Math.round(val).toLocaleString():val.toFixed(target%1?1:0))+suffix;
+    if(t<1)requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+// ── Bar fill animation ──
+function animateBar(el){
+  setTimeout(()=>{el.style.width=el.dataset.width+'%'},100);
+}
+
+// ── Intersection Observer ──
+const io=new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{
+    if(e.isIntersecting){
+      e.target.classList.add('visible');
+      e.target.querySelectorAll('[data-target]').forEach(animateCounter);
+      e.target.querySelectorAll('.bar-fill').forEach(animateBar);
+      io.unobserve(e.target);
+    }
+  });
+},{threshold:.15});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+// ── Copy code ──
+function copyCode(btn){
+  const pre=btn.closest('.code-wrap').querySelector('pre');
+  navigator.clipboard.writeText(pre.innerText).then(()=>{
+    btn.textContent='✓ copied';
+    setTimeout(()=>btn.textContent='copy',2000);
+  });
+}
+</script>
+</body>
+</html>
