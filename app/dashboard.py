@@ -72,16 +72,16 @@ JHU_MAROON = _rgb_to_hex(get_jhu_color('Maroon'))
 
 BG       = JHU_WHITE
 SURFACE  = JHU_WHITE
-SURFACE2 = '#44ACE51A'
-BORDER_C = '#002D722E'
+SURFACE2 = '#E8F4F8'  # Light blue background
+BORDER_C = '#7FA9C5'  # Medium blue border
 CORAL    = JHU_RED
 CORAL_LT = JHU_ORANGE
 SAGE     = JHU_GREEN
 GOLD     = JHU_GOLD
 INK      = JHU_BLACK
-TEXT     = '#000000D8'
-SUB      = '#000000A6'
-MUTED    = '#00000073'
+TEXT     = '#1a1a1a'  # Near-black text
+SUB      = '#666666'  # Medium gray for secondary text
+MUTED    = '#999999'  # Light gray for muted text
 
 def _apply_css_tokens(css: str) -> str:
     tokens = {
@@ -1504,11 +1504,13 @@ elif page == "🔍 Feature Analysis":
                         x=0.02,
                     ),
                     xaxis=dict(
-                        title="Feature value" + (" (log)" if use_log else "") + (" [z-normalized]" if normalize else ""),
+                        title=dict(
+                            text="Feature value" + (" (log)" if use_log else "") + (" [z-normalized]" if normalize else ""),
+                            font=dict(family="DM Sans, sans-serif", size=11, color=SUB),
+                        ),
                         type='log' if use_log else 'linear',
                         gridcolor=BORDER_C, gridwidth=0.8,
                         tickfont=dict(family="DM Mono, monospace", size=10, color=SUB),
-                        titlefont=dict(family="DM Sans, sans-serif", size=11, color=SUB),
                     ),
                     yaxis=dict(
                         tickfont=dict(family="DM Mono, monospace", size=10, color=INK),
@@ -2020,14 +2022,15 @@ elif page == "⚖️ AIMD vs Upload":
             mime='text/csv',
         )
     with col_d2:
-        # Build per-window results DataFrame
+        # Build per-window results DataFrame — use result length as reference
+        _n = len(rm['anomaly_label'])
         win_df = pd.DataFrame({
-            'window':       range(len(X_mlff)),
-            'anomaly_label': rm['anomaly_label'],
-            'confidence':    rm['confidence'],
-            'l1_flag':       rm['l1_flag'],
-            'l2_if_flag':    rm['l2_if_flag'],
-            'l2_svm_flag':   rm['l2_svm_flag'],
+            'window':        range(_n),
+            'anomaly_label': np.asarray(rm['anomaly_label'])[:_n],
+            'confidence':    np.asarray(rm['confidence'])[:_n],
+            'l1_flag':       np.asarray(rm['l1_flag'])[:_n],
+            'l2_if_flag':    np.asarray(rm['l2_if_flag'])[:_n],
+            'l2_svm_flag':   np.asarray(rm['l2_svm_flag'])[:_n],
         })
         st.download_button(
             "📥 Window results CSV",
