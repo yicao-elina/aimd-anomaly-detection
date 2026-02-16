@@ -1,0 +1,18 @@
+[server]
+# Allow uploading trajectories up to 200 MB
+maxUploadSize = 200
+# Headless mode for cloud deployments
+headless = true
+
+[browser]
+# Disable telemetry on cloud
+gatherUsageStats = false
+
+[theme]
+# JHU-inspired light theme (dashboard has its own CSS, this is a fallback)
+base = "light"
+primaryColor = "#002D72"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F0"
+textColor = "#1a1a1a"
+font = "sans serif"
