@@ -47,6 +47,8 @@ class FeatureExtractor:
         feats.update(self._dynamics_features(coords))
         feats.update(self._frequency_features(coords))
         feats.update(self._msd_features(coords))
+        feats.update(self._structural_integrity_features(coords))
+        feats.update(self._vacf_features(coords))
         if energies is not None and not np.all(np.isnan(energies)):
             feats.update(self._energy_features(energies))
         else:
@@ -206,4 +208,119 @@ class FeatureExtractor:
             'energy_mean': float(np.mean(valid)),
             'energy_std': float(np.std(valid)),
             'energy_trend': trend,
+        }
+
+    def _structural_integrity_features(self, coords: np.ndarray) -> Dict[str, float]:
+        """
+        Physics-motivated structural integrity features derived from pairwise distances.
+
+        min_interatomic_dist  — minimum pairwise atomic distance over the window (Å).
+            Detects atomic clashes / core-repulsion violations.  Any value below ~1.5 Å
+            for heavy atoms signals a nonsensical configuration.
+
+        rdf_first_peak_pos   — position of the first peak in the windowed radial
+            distribution function (Å).  Shifts indicate bond-length drift or a
+            structural phase change.
+
+        rdf_first_peak_height — normalised height of the first RDF peak.
+            Peak collapse or broadening indicates order→disorder transition; large
+            values relative to AIMD baseline flag anomalous configurations.
+        """
+        n_frames, n_atoms, _ = coords.shape
+
+        # --- all-pairs distance matrix via ||a-b||² = ||a||² + ||b||² - 2 a·b ---
+        # Uses batched BLAS matmul: avoids the (T, N, N, 3) broadcast diff
+        # which allocates 3× more memory and is slower for large windows.
+        norms_sq = np.einsum('tij,tij->ti', coords, coords)           # (T, N)
+        dots     = np.matmul(coords, coords.swapaxes(-1, -2))         # (T, N, N)
+        dist_sq  = norms_sq[:, :, None] + norms_sq[:, None, :] - 2.0 * dots  # (T, N, N)
+        np.clip(dist_sq, 0.0, None, out=dist_sq)      # numerical safety (no sqrt of negatives)
+        # Zero the diagonal so it doesn't pollute min search
+        diag_idx = np.arange(n_atoms)
+        dist_sq[:, diag_idx, diag_idx] = np.inf
+        dist_mat = np.sqrt(dist_sq)                                    # (T, N, N)
+
+        min_dist = float(np.min(dist_mat))
+
+        # --- windowed RDF: subsample up to 10 frames to reduce histogram cost ---
+        rdf_n    = min(n_frames, 10)
+        rdf_idx  = np.linspace(0, n_frames - 1, rdf_n, dtype=int)
+        triu     = np.triu_indices(n_atoms, k=1)
+        all_dists = dist_mat[rdf_idx][:, triu[0], triu[1]].ravel()   # (rdf_n * n_pairs,)
+
+        r_min, r_max, n_bins = 1.5, 8.0, 100
+        valid = all_dists[(all_dists >= r_min) & (all_dists < r_max)]
+
+        if len(valid) < 10:
+            return {
+                'min_interatomic_dist': min_dist,
+                'rdf_first_peak_pos': np.nan,
+                'rdf_first_peak_height': np.nan,
+            }
+
+        counts, edges = np.histogram(valid, bins=n_bins, range=(r_min, r_max))
+        bin_centers = 0.5 * (edges[:-1] + edges[1:])
+        bin_width = float(edges[1] - edges[0])
+
+        # Normalise by shell volume ∝ r² to obtain a proper g(r) shape
+        rdf = counts.astype(float) / (bin_centers ** 2 + 1e-10) / (bin_width + 1e-10)
+        rdf_mean = rdf.mean()
+        rdf = rdf / (rdf_mean + 1e-10)               # normalise so bulk → 1
+
+        # First peak: highest bin in the first 40 % of the r range
+        search_end = max(1, int(n_bins * 0.40))
+        peak_idx = int(np.argmax(rdf[:search_end]))
+
+        return {
+            'min_interatomic_dist': min_dist,
+            'rdf_first_peak_pos': float(bin_centers[peak_idx]),
+            'rdf_first_peak_height': float(rdf[peak_idx]),
+        }
+
+    def _vacf_features(self, coords: np.ndarray) -> Dict[str, float]:
+        """
+        Velocity Auto-Correlation Function (VACF) features.
+        Velocities are approximated as frame-to-frame coordinate differences.
+
+        vacf_initial_decay   — normalised VACF drop from τ=0 to τ=1 (i.e.
+            VACF[0] − VACF[1]) / VACF[0].  Large values indicate stiff, high-
+            frequency vibrations or erratic atomic motion characteristic of MLFF
+            instability.
+
+        vacf_zero_crossing   — first zero-crossing time expressed as a fraction
+            of the maximum lag searched.  Short crossing time ↔ high-frequency
+            oscillations; absence of crossing (value=1.0) ↔ strongly correlated
+            drift (catastrophic displacement).
+        """
+        vel = np.diff(coords, axis=0)   # (T-1, n_atoms, 3)
+        T = vel.shape[0]
+
+        if T < 4:
+            return {'vacf_initial_decay': np.nan, 'vacf_zero_crossing': np.nan}
+
+        max_lag = min(T // 2, 20)
+
+        # VACF[τ] = mean over time origins and atoms of v(t)·v(t+τ)
+        vacf = np.empty(max_lag)
+        for lag in range(max_lag):
+            # dot product over 3-D velocity components: (T-lag, n_atoms)
+            dot = np.einsum('taj,taj->ta', vel[:T - lag], vel[lag:T])
+            vacf[lag] = float(np.mean(dot))
+
+        norm = vacf[0] if abs(vacf[0]) > 1e-30 else 1.0
+        vacf_norm = vacf / norm
+
+        # Initial decay fraction
+        initial_decay = float(vacf_norm[0] - vacf_norm[1]) if max_lag > 1 else 0.0
+
+        # First zero crossing (sign change between consecutive lags)
+        zero_crossing = 1.0  # default: no crossing found
+        for i in range(1, max_lag):
+            if vacf_norm[i - 1] * vacf_norm[i] <= 0:
+                zero_crossing = float(i) / max_lag
+                break
+
+        return {
+            'vacf_initial_decay': initial_decay,
+            'vacf_zero_crossing': zero_crossing,
         }
