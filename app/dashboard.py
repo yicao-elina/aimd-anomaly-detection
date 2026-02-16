@@ -1418,7 +1418,7 @@ try:
     D = load_all()
 except FileNotFoundError as e:
     st.error(f"**Pipeline outputs missing:** {e}")
-    st.info("Run the pipeline first:\n```bash\n/Users/alina/anaconda3/envs/agentic/bin/python scripts/run_full_pipeline.py\n```")
+    st.info("Run the pipeline first:\n```bash\npython scripts/run_full_pipeline.py\n```")
     st.stop()
 
 X_aimd        = D['X_aimd']
