@@ -1024,9 +1024,15 @@ def load_all():
         'framework':     framework,
         'summary':       json.load(open(PROCESSED_DIR / 'pipeline_summary.json')),
         # Default MLFF dataset (from original pipeline run)
-        'X_mlff_default':   mlff_npz['X'],
+        'X_mlff_default':    mlff_npz['X'],
         'meta_mlff_default': pd.read_csv(PROCESSED_DIR / 'meta_mlff.csv'),
-        'feat_cmp_default':  pd.read_csv(REPORTS_DIR / 'feature_comparison.csv'),
+        'feat_cmp_default':  (
+            pd.read_csv(REPORTS_DIR / 'feature_comparison.csv')
+            if (REPORTS_DIR / 'feature_comparison.csv').exists()
+            else _build_feat_cmp_placeholder(
+                list(aimd_npz['feature_names']), mlff_npz['X'], aimd_npz['X']
+            )
+        ),
     }
 
 
