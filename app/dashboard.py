@@ -1497,16 +1497,35 @@ uploaded_file = st.sidebar.file_uploader(
 if uploaded_file is not None:
     key = uploaded_file.name
     if key not in st.session_state.uploads:
-        with st.sidebar.status(f"Analyzing {uploaded_file.name}…", expanded=False):
+        xyz_bytes = uploaded_file.read()
+        file_mb   = len(xyz_bytes) / 1_048_576
+        # Warn if the file is large (> 50 MB) so the user knows to expect a wait
+        if file_mb > 50:
+            st.sidebar.warning(
+                f"Large file ({file_mb:.0f} MB) — this may take 20–60 s. "
+                "Processing in background…"
+            )
+        with st.sidebar.status(
+            f"Analyzing {uploaded_file.name} ({file_mb:.1f} MB)…",
+            expanded=True,
+        ) as _upload_status:
             try:
                 result = _run_upload_pipeline(
-                    uploaded_file.read(), uploaded_file.name, D
+                    xyz_bytes, uploaded_file.name, D,
+                    _status=_upload_status,
                 )
                 st.session_state.uploads[key] = result
                 st.session_state.active_upload = key
-                st.sidebar.success(f"✓ {uploaded_file.name} — {result['n_windows']} windows")
+                _upload_status.update(
+                    label=f"✓ {uploaded_file.name} — {result['n_windows']} windows · "
+                          f"{result['anom_rate']:.0%} anomaly",
+                    state="complete", expanded=False,
+                )
             except Exception as exc:
-                st.sidebar.error(f"Pipeline error: {exc}")
+                import traceback
+                _upload_status.update(label=f"✗ {uploaded_file.name}", state="error")
+                st.sidebar.error(f"**Pipeline error:** {exc}")
+                st.sidebar.code(traceback.format_exc(), language="python")
     else:
         # Already processed — just switch to it
         st.session_state.active_upload = key
