@@ -228,24 +228,37 @@ class FeatureExtractor:
         """
         n_frames, n_atoms, _ = coords.shape
 
+        # For very large supercells (n_atoms > 256), computing all O(n²) pairwise
+        # distances requires hundreds of MB per window and will OOM.  Subsample
+        # up to MAX_ATOMS atoms uniformly; distances within the subsample are
+        # representative for RDF / min-dist detection purposes.
+        MAX_ATOMS = 256
+        if n_atoms > MAX_ATOMS:
+            rng_idx = np.linspace(0, n_atoms - 1, MAX_ATOMS, dtype=int)
+            coords_sub = coords[:, rng_idx, :]
+            n_atoms_eff = MAX_ATOMS
+        else:
+            coords_sub = coords
+            n_atoms_eff = n_atoms
+
         # --- all-pairs distance matrix via ||a-b||² = ||a||² + ||b||² - 2 a·b ---
         # Uses batched BLAS matmul: avoids the (T, N, N, 3) broadcast diff
         # which allocates 3× more memory and is slower for large windows.
-        norms_sq = np.einsum('tij,tij->ti', coords, coords)           # (T, N)
-        dots     = np.matmul(coords, coords.swapaxes(-1, -2))         # (T, N, N)
-        dist_sq  = norms_sq[:, :, None] + norms_sq[:, None, :] - 2.0 * dots  # (T, N, N)
+        norms_sq = np.einsum('tij,tij->ti', coords_sub, coords_sub)           # (T, M)
+        dots     = np.matmul(coords_sub, coords_sub.swapaxes(-1, -2))         # (T, M, M)
+        dist_sq  = norms_sq[:, :, None] + norms_sq[:, None, :] - 2.0 * dots  # (T, M, M)
         np.clip(dist_sq, 0.0, None, out=dist_sq)      # numerical safety (no sqrt of negatives)
         # Zero the diagonal so it doesn't pollute min search
-        diag_idx = np.arange(n_atoms)
+        diag_idx = np.arange(n_atoms_eff)
         dist_sq[:, diag_idx, diag_idx] = np.inf
-        dist_mat = np.sqrt(dist_sq)                                    # (T, N, N)
+        dist_mat = np.sqrt(dist_sq)                                            # (T, M, M)
 
         min_dist = float(np.min(dist_mat))
 
         # --- windowed RDF: subsample up to 10 frames to reduce histogram cost ---
         rdf_n    = min(n_frames, 10)
         rdf_idx  = np.linspace(0, n_frames - 1, rdf_n, dtype=int)
-        triu     = np.triu_indices(n_atoms, k=1)
+        triu     = np.triu_indices(n_atoms_eff, k=1)
         all_dists = dist_mat[rdf_idx][:, triu[0], triu[1]].ravel()   # (rdf_n * n_pairs,)
 
         r_min, r_max, n_bins = 1.5, 8.0, 100
