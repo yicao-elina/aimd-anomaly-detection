@@ -1011,6 +1011,20 @@ def _impute(X):
     return out
 
 
+def _build_feat_cmp_placeholder(feature_names, X_mlff, X_aimd):
+    """Fallback for when feature_comparison.csv doesn't exist (e.g. fresh clone)."""
+    aimd_means = np.nanmean(X_aimd, axis=0)
+    aimd_stds  = np.nanstd(X_aimd, axis=0)
+    upl_means  = np.nanmean(X_mlff, axis=0)
+    rows = []
+    for i, fn in enumerate(feature_names):
+        z = (upl_means[i] - aimd_means[i]) / (aimd_stds[i] + 1e-10)
+        rel = (upl_means[i] - aimd_means[i]) / (abs(aimd_means[i]) + 1e-10) * 100
+        rows.append({'feature': fn, 'aimd_mean': aimd_means[i], 'aimd_std': aimd_stds[i],
+                     'mlff_mean': upl_means[i], 'z_score': z, 'relative_change_%': rel})
+    return pd.DataFrame(rows).sort_values('z_score', key=abs, ascending=False).reset_index(drop=True)
+
+
 # ── Data loading (cached) ────────────────────────────────────────────────────
 @st.cache_resource
 def load_all():
