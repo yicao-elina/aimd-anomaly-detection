@@ -38,7 +38,7 @@ from sklearn.inspection import permutation_importance
 from sklearn.ensemble import RandomForestClassifier
 
 from src.core.loaders import TrajectoryLoader, load_all_trajectories
-from src.core.feature_extractors import FeatureExtractor, WindowConfig
+from src.core.feature_extractors import FeatureExtractor, WindowConfig, ISOLATED_ATOM_ENERGIES
 from src.core.detectors import AnomalyDetectionFramework
 from src.core.models import LSTMAnomalyDetector
 
