@@ -71,8 +71,9 @@ class FeatureExtractor:
 
     def extract_all_windows(
         self,
-        coords: np.ndarray,          # (n_frames, n_atoms, 3)
+        coords: np.ndarray,                      # (n_frames, n_atoms, 3)
         energies: Optional[np.ndarray] = None,
+        species: Optional[List[str]] = None,     # length n_atoms; constant across frames
     ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
         """
         Extract features for every sliding window.
@@ -91,7 +92,7 @@ class FeatureExtractor:
         for start, end in windows:
             w_coords = coords[start:end]
             w_energies = energies[start:end] if energies is not None else None
-            feats = self.extract_window(w_coords, w_energies)
+            feats = self.extract_window(w_coords, w_energies, species)
             all_feats.append(feats)
 
         if not self.feature_names:
