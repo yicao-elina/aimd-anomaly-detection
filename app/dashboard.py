@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.core.loaders import TrajectoryLoader
-from src.core.feature_extractors import FeatureExtractor, WindowConfig
+from src.core.feature_extractors import FeatureExtractor, WindowConfig, compute_file_energy_shift
 from src.core.detectors import AnomalyDetectionFramework
 from src.core.llm_analyst import OllamaAnalyst, build_data_context
 from src.utils.jhu_colors.jhu_colors.colors import get_jhu_color
