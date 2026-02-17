@@ -17,10 +17,22 @@ import sys
 import io
 import json
 import pickle
+import socket
 import tempfile
 import datetime
 import traceback
 from pathlib import Path
+
+
+def _ollama_available() -> bool:
+    try:
+        s = socket.create_connection(("localhost", 11434), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+OLLAMA_AVAILABLE = _ollama_available()
 
 import matplotlib
 matplotlib.use('Agg')
@@ -973,6 +985,254 @@ def _build_feat_comparison(X_aimd, X_upload, feature_names):
     return df.reset_index(drop=True)
 
 
+def _parse_lattice_from_comment(comment_line: str):
+    """Extract 3×3 lattice matrix from extended-XYZ comment line. Returns (3,3) array or None."""
+    import re
+    m = re.search(r'Lattice="([^"]+)"', comment_line)
+    if m:
+        vals = list(map(float, m.group(1).split()))
+        if len(vals) == 9:
+            return np.array(vals, dtype=float).reshape(3, 3)
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def _sample_traj_for_viewer(filepath: str, n_sample: int = 75):
+    """
+    Load XYZ trajectory, sample n_sample frames evenly.
+    Returns (coords_s, species, lattice, orig_indices, n_total_frames).
+    orig_indices — array of original frame numbers corresponding to each sampled frame.
+    """
+    loader = TrajectoryLoader()
+    traj   = loader.load(filepath)
+    coords   = traj['coordinates']            # (n_frames, n_atoms, 3)
+    species  = traj['species']
+    n_total  = int(coords.shape[0])
+    n_take   = min(n_sample, n_total)
+    idx      = np.linspace(0, n_total - 1, n_take, dtype=int)
+    coords_s = coords[idx]
+    # Parse lattice from first comment line
+    lattice = None
+    with open(filepath, 'r') as f:
+        try:
+            int(f.readline().strip())
+            lattice = _parse_lattice_from_comment(f.readline())
+        except Exception:
+            pass
+    return coords_s, species, lattice, idx, n_total
+
+
+def inject_3d_viewer(coords, species, lattice, orig_indices, n_total_frames: int,
+                     title: str, height: int = 500) -> None:
+    """
+    Embed an interactive 3D molecular trajectory viewer using 3Dmol.js.
+
+    coords:         np.array (n_frames, n_atoms, 3) — sampled frames
+    species:        list[str] length n_atoms
+    lattice:        (3,3) np.array or None — draws unit-cell box
+    orig_indices:   array-like of ints, length n_frames — original step numbers
+    n_total_frames: int — total frames in the source trajectory (for label)
+    """
+    import json, uuid
+    uid      = uuid.uuid4().hex[:8]
+    n_frames = int(coords.shape[0])
+    n_atoms  = int(coords.shape[1])
+
+    # ── Compact per-frame position data (3-decimal precision) ─────────────────
+    # frames_data[fi][ai] = [x, y, z]
+    frames_data = [
+        [[round(float(coords[fi, ai, j]), 3) for j in range(3)] for ai in range(n_atoms)]
+        for fi in range(n_frames)
+    ]
+    frames_js    = json.dumps(frames_data)
+    sp_list_js   = json.dumps(list(species))
+    orig_idx_js  = json.dumps([int(x) for x in orig_indices])
+
+    # ── Unit-cell box JS (12 edges as thin cylinders, added once as shapes) ───
+    lattice_js = ""
+    if lattice is not None:
+        a = lattice.tolist()
+        lattice_js = f"""
+    (function() {{
+      var a1=[{a[0][0]},{a[0][1]},{a[0][2]}],
+          a2=[{a[1][0]},{a[1][1]},{a[1][2]}],
+          a3=[{a[2][0]},{a[2][1]},{a[2][2]}];
+      var corners = [
+        [0,0,0],
+        a1, a2, a3,
+        [a1[0]+a2[0], a1[1]+a2[1], a1[2]+a2[2]],
+        [a1[0]+a3[0], a1[1]+a3[1], a1[2]+a3[2]],
+        [a2[0]+a3[0], a2[1]+a3[1], a2[2]+a3[2]],
+        [a1[0]+a2[0]+a3[0], a1[1]+a2[1]+a3[1], a1[2]+a2[2]+a3[2]]
+      ];
+      var edges = [[0,1],[0,2],[0,3],[1,4],[1,5],[2,4],[2,6],[3,5],[3,6],[4,7],[5,7],[6,7]];
+      edges.forEach(function(e) {{
+        viewer.addCylinder({{
+          start: {{x:corners[e[0]][0], y:corners[e[0]][1], z:corners[e[0]][2]}},
+          end:   {{x:corners[e[1]][0], y:corners[e[1]][1], z:corners[e[1]][2]}},
+          radius: 0.06, color: '#778899', fromCap: 1, toCap: 1
+        }});
+      }});
+    }})();"""
+
+    html = f"""
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400&family=DM+Sans:wght@500&display=swap" rel="stylesheet"/>
+<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+<style>
+  #wrap_{uid} {{ font-family:'DM Sans',sans-serif; background:#0d1117;
+    border-radius:12px; padding:10px; box-sizing:border-box; }}
+  #vdiv_{uid} {{ width:100%; height:{height-76}px; border-radius:8px;
+    background:#0d1117; position:relative; overflow:hidden; }}
+  .vt_{uid}  {{ font-size:11px; font-weight:600; letter-spacing:.13em;
+    text-transform:uppercase; color:#6b8cba; margin-bottom:6px; }}
+  .vc_{uid}  {{ display:flex; align-items:center; gap:8px;
+    margin-top:8px; flex-wrap:wrap; }}
+  .vb_{uid}  {{ background:#1a2744; border:1px solid #2e4470; color:#93b4de;
+    font-family:'DM Mono',monospace; font-size:11px; padding:4px 11px;
+    border-radius:5px; cursor:pointer; user-select:none; }}
+  .vb_{uid}:hover {{ background:#243557; }}
+  .vs_{uid}  {{ flex:1; min-width:60px; accent-color:#5b8dd9; cursor:pointer; height:4px; }}
+  .vl_{uid}  {{ font-family:'DM Mono',monospace; font-size:10px;
+    color:#6b8cba; white-space:nowrap; min-width:110px; }}
+  .vsp_{uid} {{ background:#1a2744; border:1px solid #2e4470; color:#6b8cba;
+    font-family:'DM Mono',monospace; font-size:10px; padding:2px 6px;
+    border-radius:4px; cursor:pointer; }}
+</style>
+<div id="wrap_{uid}">
+  <div class="vt_{uid}">{title}</div>
+  <div id="vdiv_{uid}"></div>
+  <div class="vc_{uid}">
+    <button class="vb_{uid}" id="pbtn_{uid}">▶ Play</button>
+    <input  class="vs_{uid}" type="range" id="fslider_{uid}"
+            min="0" max="{n_frames-1}" value="0"/>
+    <span   class="vl_{uid}" id="flbl_{uid}">step 0 / {n_total_frames}</span>
+    <select class="vsp_{uid}" id="fspd_{uid}">
+      <option value="200">0.5×</option>
+      <option value="120" selected>1×</option>
+      <option value="60">2×</option>
+      <option value="30">4×</option>
+    </select>
+    <button class="vb_{uid}" id="rstbtn_{uid}">⟳</button>
+  </div>
+</div>
+<script>
+(function() {{
+  // ── Data ──────────────────────────────────────────────────────────────────
+  var frames   = {frames_js};       // [nFrames][nAtoms][3]
+  var spList   = {sp_list_js};      // [nAtoms] element symbols
+  var origIdx  = {orig_idx_js};     // [nFrames] original step numbers
+  var nFrames  = {n_frames};
+  var nTotal   = {n_total_frames};
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  var curF     = 0;
+  var interval = 120;
+  var playing  = false;
+  var timer    = null;
+  var curModel = null;
+
+  // ── Viewer ────────────────────────────────────────────────────────────────
+  var container = document.getElementById('vdiv_{uid}');
+  var viewer = $3Dmol.createViewer(container, {{backgroundColor: '#0d1117'}});
+
+  // Draw unit-cell box once (shapes persist across removeAllModels)
+  {lattice_js}
+
+  // ── Atom helpers ──────────────────────────────────────────────────────────
+  function makeAtoms(fi) {{
+    var atoms = [];
+    var pos = frames[fi];
+    for (var i = 0; i < pos.length; i++) {{
+      atoms.push({{
+        elem: spList[i],
+        x: pos[i][0], y: pos[i][1], z: pos[i][2],
+        serial: i, bonds: [], bondOrder: []
+      }});
+    }}
+    return atoms;
+  }}
+
+  function applyStyles(model) {{
+    model.setStyle({{elem:'Sb'}}, {{sphere:{{radius:0.38, color:'#8B5CF6'}}}});
+    model.setStyle({{elem:'Te'}}, {{sphere:{{radius:0.34, color:'#06B6D4'}}}});
+    model.setStyle({{elem:'Cr'}}, {{sphere:{{radius:0.30, color:'#EF4444'}}}});
+    model.setStyle({{elem:'S'}},  {{sphere:{{radius:0.25, color:'#FBBF24'}}}});
+    model.setStyle({{elem:'O'}},  {{sphere:{{radius:0.22, color:'#F87171'}}}});
+  }}
+
+  // ── Initial frame ─────────────────────────────────────────────────────────
+  curModel = viewer.addModel();
+  curModel.addAtoms(makeAtoms(0));
+  applyStyles(curModel);
+  viewer.zoomTo();
+  viewer.render();
+
+  // ── Frame seek (core function) ─────────────────────────────────────────────
+  function seekFrame(i) {{
+    i = Math.max(0, Math.min(nFrames - 1, i | 0));
+    curF = i;
+
+    // Preserve camera before swapping model
+    var view = viewer.getView();
+
+    // Replace model (removeAllModels only clears molecular models, NOT shapes)
+    viewer.removeAllModels();
+    curModel = viewer.addModel();
+    curModel.addAtoms(makeAtoms(i));
+    applyStyles(curModel);
+
+    // Restore camera so view doesn't jump
+    viewer.setView(view);
+    viewer.render();
+
+    // Update controls
+    document.getElementById('fslider_{uid}').value = i;
+    document.getElementById('flbl_{uid}').textContent =
+      'step ' + origIdx[i] + ' / ' + nTotal;
+  }}
+
+  // ── Slider ────────────────────────────────────────────────────────────────
+  document.getElementById('fslider_{uid}').addEventListener('input', function() {{
+    seekFrame(parseInt(this.value));
+  }});
+
+  // ── Play / Pause ──────────────────────────────────────────────────────────
+  document.getElementById('pbtn_{uid}').addEventListener('click', function() {{
+    if (playing) {{
+      clearInterval(timer);
+      playing = false;
+      this.textContent = '▶ Play';
+    }} else {{
+      playing = true;
+      this.textContent = '⏸ Pause';
+      timer = setInterval(function() {{
+        seekFrame((curF + 1) % nFrames);
+      }}, interval);
+    }}
+  }});
+
+  // ── Speed selector ────────────────────────────────────────────────────────
+  document.getElementById('fspd_{uid}').addEventListener('change', function() {{
+    interval = parseInt(this.value);
+    if (playing) {{
+      clearInterval(timer);
+      timer = setInterval(function() {{
+        seekFrame((curF + 1) % nFrames);
+      }}, interval);
+    }}
+  }});
+
+  // ── Reset view ────────────────────────────────────────────────────────────
+  document.getElementById('rstbtn_{uid}').addEventListener('click', function() {{
+    viewer.zoomTo();
+    viewer.render();
+  }});
+
+}})();
+</script>"""
+    components.html(html, height=height, scrolling=False)
+
+
 def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict) -> dict:
     """
     Predict-only pipeline for an uploaded .xyz file.
@@ -989,14 +1249,30 @@ def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict) -> dict:
 
     traj = loader.load(tmp_path)
     coords   = traj['coordinates']   # (n_frames, n_atoms, 3)
+    species  = traj.get('species', [])
     energies = traj.get('energies')
     meta_raw = traj.get('metadata', {})
+
+    # Parse lattice from first comment line for 3D viewer
+    lattice_viewer = None
+    try:
+        with open(tmp_path, 'r') as _f:
+            int(_f.readline().strip())
+            lattice_viewer = _parse_lattice_from_comment(_f.readline())
+    except Exception:
+        pass
 
     X_upl, windows = extractor.extract_all_windows(coords, energies)
     X_upl = _impute(X_upl)
 
     framework = D['framework']
     results   = framework.predict(X_upl)
+
+    # Sample coords for 3D viewer (75 frames max, store orig indices for step labels)
+    n_total_fr = int(coords.shape[0])
+    n_sample   = min(75, n_total_fr)
+    idx_s      = np.linspace(0, n_total_fr - 1, n_sample, dtype=int)
+    coords_s   = coords[idx_s]
 
     # Build metadata  (windows is a list of (start, end) tuples)
     n_w = len(X_upl)
@@ -1022,6 +1298,12 @@ def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict) -> dict:
         'n_frames':  coords.shape[0],
         'n_atoms':   coords.shape[1],
         'anom_rate': float(np.mean(results['anomaly_label'])),
+        # 3D viewer data
+        'coords_viewer':    coords_s,        # (n_sample, n_atoms, 3) float32
+        'species_viewer':   species,
+        'lattice_viewer':   lattice_viewer,
+        'orig_idx_viewer':  idx_s,           # original step indices
+        'n_total_frames':   n_total_fr,
     }
 
 
@@ -1301,6 +1583,59 @@ if page == "📊 Data Overview":
         "**Quality note:** All AIMD files loaded successfully. Energy drift warnings "
         "(12/13 files) are expected for NVT-AIMD thermostats and do not affect structural anomaly detection."
     )
+
+    # ── 3D Trajectory Viewers ─────────────────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("3D Molecular Trajectories")
+    st.caption(
+        "WebGL interactive viewer · atoms rendered as spheres · "
+        "Sb = purple, Te = teal, Cr = red · lattice box shown in gray"
+    )
+
+    v_col_a, v_col_b = st.columns(2)
+
+    with v_col_a:
+        # ── AIMD baseline file selector ───────────────────────────────────────
+        raw_dir = ROOT / 'data' / 'raw'
+        aimd_xyz_files = sorted(raw_dir.rglob('*.xyz'))
+        aimd_labels    = [str(p.relative_to(raw_dir)) for p in aimd_xyz_files]
+
+        if not aimd_xyz_files:
+            st.info("No AIMD .xyz files found in data/raw/.")
+        else:
+            sel_label = st.selectbox(
+                "AIMD file", aimd_labels, key="viewer_aimd_sel",
+                label_visibility="collapsed",
+                help="Select an AIMD trajectory file to visualize",
+            )
+            sel_path = str(raw_dir / sel_label)
+            with st.spinner("Loading AIMD trajectory…"):
+                try:
+                    c_aimd, sp_aimd, lat_aimd, oidx_aimd, ntot_aimd = \
+                        _sample_traj_for_viewer(sel_path, n_sample=75)
+                    inject_3d_viewer(c_aimd, sp_aimd, lat_aimd, oidx_aimd, ntot_aimd,
+                                     title=f"AIMD · {sel_label}",
+                                     height=520)
+                except Exception as _e:
+                    st.error(f"Could not load viewer: {_e}")
+
+    with v_col_b:
+        # ── Active upload viewer ──────────────────────────────────────────────
+        c_upl   = active_data.get('coords_viewer')
+        sp_upl  = active_data.get('species_viewer')
+        lat_upl = active_data.get('lattice_viewer')
+        oidx_upl= active_data.get('orig_idx_viewer')
+        ntot_upl= active_data.get('n_total_frames', 0)
+
+        if c_upl is None or len(sp_upl or []) == 0:
+            st.info(
+                "Upload a trajectory via the sidebar to see the 3D viewer here.\n\n"
+                "The default MLFF baseline does not carry raw coordinate data."
+            )
+        else:
+            inject_3d_viewer(c_upl, sp_upl, lat_upl, oidx_upl, ntot_upl,
+                             title=f"Upload · {upload_name}",
+                             height=520)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
