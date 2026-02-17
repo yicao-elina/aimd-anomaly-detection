@@ -30,11 +30,11 @@
   ],
   "n_aimd_windows": 1648,
   "n_mlff_windows": 835,
-  "aimd_anomaly_rate_l12": 0.03762135922330097,
+  "aimd_anomaly_rate_l12": 0.03944174757281554,
   "mlff_anomaly_rate_l12": 1.0,
-  "aimd_anomaly_rate_all3": 0.34146341463414637,
+  "aimd_anomaly_rate_all3": 0.3353658536585366,
   "mlff_anomaly_rate_all3": 1.0,
-  "lstm_threshold": 0.21134829819202422,
+  "lstm_threshold": 0.20786571502685544,
   "window_size": 50,
   "stride": 10
 }
