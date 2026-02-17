@@ -1,0 +1,4 @@
+{
+  "ref_atm_per_atom": -3.7499699910449973,
+  "description": "Mean per-atom atomization energy (eV/atom) across DFT-compatible AIMD training files. Used as the Option B empirical energy shift target for files with different pseudopotentials."
+}
