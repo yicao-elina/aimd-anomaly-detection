@@ -10,11 +10,11 @@
 | Metric | AIMD (normal) | MLFF (test) |
 |--------|--------------|-------------|
 | Total windows | 1648 | 835 |
-| L1+L2 anomaly rate | 4.0% | 100.0% |
-| All-3 anomaly rate | 32.9% | 100.0% |
+| L1+L2 anomaly rate | 3.8% | 100.0% |
+| All-3 anomaly rate | 35.4% | 100.0% |
 | L1 (statistical) | 6.5% | 100.0% |
-| L2 Isolation Forest | 4.9% | 100.0% |
-| L2 One-Class SVM | 4.9% | 100.0% |
+| L2 Isolation Forest | 5.0% | 100.0% |
+| L2 One-Class SVM | 4.7% | 100.0% |
 
 ---
 
@@ -37,7 +37,7 @@
 
 ## Physical Interpretation
 
-The MLFF trajectory shows a **25.0x higher anomaly rate**
+The MLFF trajectory shows a **26.6x higher anomaly rate**
 than AIMD at the L1+L2 level. The top deviating features suggest:
 
 - **Dynamics features** (RMS velocity, crest factor) deviating → MLFF force field may
