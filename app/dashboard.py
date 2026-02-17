@@ -1360,13 +1360,18 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
+_nav_pages = [
+    "📊 Data Overview",
+    "🔍 Feature Analysis",
+    "⚠️ Anomaly Detection",
+    "⚖️ AIMD vs Upload",
+]
+if OLLAMA_AVAILABLE:
+    _nav_pages.append("🤖 AI Analysis")
+
 page = st.sidebar.radio(
     "Navigate",
-    ["📊 Data Overview",
-     "🔍 Feature Analysis",
-     "⚠️ Anomaly Detection",
-     "⚖️ AIMD vs Upload",
-     "🤖 AI Analysis"],
+    _nav_pages,
     label_visibility="collapsed",
 )
 
