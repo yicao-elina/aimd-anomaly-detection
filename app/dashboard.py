@@ -1370,7 +1370,7 @@ def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict,
         # ── Step 3: feature extraction ───────────────────────────────────────
         _step(f"⚙️ Extracting 27 features (window=50, stride=10)…")
         extractor = FeatureExtractor(WindowConfig(window_size=50, stride=10))
-        X_upl, windows = extractor.extract_all_windows(coords, energies)
+        X_upl, windows = extractor.extract_all_windows(coords, energies, species)
         X_upl = _impute(X_upl)
         _step(f"   → {len(windows)} windows · {X_upl.shape[1]} features")
 
