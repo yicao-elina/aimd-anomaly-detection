@@ -1449,6 +1449,8 @@ def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict,
             'lattice_viewer': lattice_viewer,
             'orig_idx_viewer': idx_s,
             'n_total_frames': n_frames,
+            'energy_shift':   e_shift,
+            'energy_shift_note': shift_note,
         }
     finally:
         # Always clean up the temp file
