@@ -66,6 +66,105 @@ MLFF_DIR = ROOT / 'data' / 'raw' / 'mlff'
 
 
 # =============================================================================
+# ENERGY COMPATIBILITY AUDIT
+# =============================================================================
+
+def energy_audit(data_dirs) -> dict:
+    """
+    Audit energy compatibility across all XYZ files in the given directories.
+
+    DFT total energies depend on the choice of pseudopotential (POTCAR in VASP).
+    Files computed with different pseudopotentials cannot share the same E0
+    isolated-atom references and will produce unphysical atomization energies
+    when normalised together.
+
+    Strategy:
+        • "compatible"   — E_atm/atom in (-20, 0) eV/atom  → use energy features
+        • "incompatible" — E_atm/atom outside that range    → energy → NaN (imputed)
+        • "no energy"    — no energies in file               → energy → NaN
+
+    For incompatible files, structural/dynamical features are still valid and
+    are retained in training.  Energy features for those files are set to NaN
+    by the _energy_features plausibility guard in feature_extractors.py.
+
+    Option B (empirical shift) — use when incompatible data is NOT redundant:
+        The per-file mean E_raw/atom is shifted to match the reference group mean.
+        This is the MACE/NequIP approach of fitting isolated-atom E0 per dataset.
+        Implementation sketch (not run automatically):
+
+            ref_mean_raw   = mean(E_raw/atom) across all compatible files
+            shift_i        = mean(E_raw/atom, file_i) - ref_mean_raw
+            E_corrected    = E_raw_i - shift_i * N_atoms_i
+            → then compute E_atm/atom with the shared E0 references
+
+    Returns a dict mapping file path → {'raw_per_atom', 'atm_per_atom', 'compatible'}
+    """
+    from collections import Counter
+    loader = TrajectoryLoader()
+    report = {}
+
+    for d in data_dirs:
+        for xyz in sorted(Path(d).glob('*.xyz')):
+            try:
+                traj = loader.load(str(xyz))
+            except Exception:
+                continue
+            sp  = traj.get('species', [])
+            en  = traj['energies']
+            valid = en[~np.isnan(en)]
+            if len(valid) == 0 or len(sp) == 0:
+                report[str(xyz)] = {'raw_per_atom': np.nan, 'atm_per_atom': np.nan,
+                                    'compatible': None, 'n_atoms': len(sp)}
+                continue
+            n = len(sp)
+            counts = Counter(sp)
+            ref = sum(c * ISOLATED_ATOM_ENERGIES.get(el, 0) for el, c in counts.items())
+            raw_per_atom = float(np.mean(valid)) / n
+            atm_per_atom = (float(np.mean(valid)) - ref) / n
+            compatible = (-20.0 < atm_per_atom < 0.0)
+            report[str(xyz)] = {
+                'raw_per_atom': raw_per_atom,
+                'atm_per_atom': atm_per_atom,
+                'compatible': compatible,
+                'n_atoms': n,
+                'species': dict(counts),
+            }
+    return report
+
+
+def print_energy_audit(dirs, label=''):
+    report = energy_audit(dirs)
+    incompatible = [p for p, v in report.items() if v['compatible'] is False]
+    print(f"\n{'─'*70}")
+    print(f"Energy Compatibility Audit{' — ' + label if label else ''}")
+    print(f"{'─'*70}")
+    print(f"  {'File':<44} {'E_atm/atom':>12}  Status")
+    print(f"  {'─'*44} {'─'*12}  {'─'*14}")
+    for path, v in report.items():
+        fname = Path(path).name
+        atm = v['atm_per_atom']
+        if v['compatible'] is None:
+            status = '— no energy'
+        elif v['compatible']:
+            status = '✓ compatible'
+        else:
+            status = '✗ INCOMPATIBLE → energy NaN'
+        atm_str = f"{atm:12.4f}" if not np.isnan(atm) else f"{'NaN':>12}"
+        print(f"  {fname:<44} {atm_str}  {status}")
+    if incompatible:
+        print(f"\n  ⚠  {len(incompatible)} incompatible file(s) detected.")
+        print(f"     Energy features will be set to NaN for these files.")
+        print(f"     Structural/dynamical features are retained (POTCAR-independent).")
+        print(f"     If these files are non-redundant, consider Option B (empirical")
+        print(f"     energy shift): subtract per-file mean E_raw/atom from each frame")
+        print(f"     energy before normalisation (matches the MACE/NequIP approach).")
+    else:
+        print(f"\n  ✓ All files use compatible pseudopotentials.")
+    print(f"{'─'*70}\n")
+    return report
+
+
+# =============================================================================
 # STEP 2 + 3: Load trajectories and extract features
 # =============================================================================
 
