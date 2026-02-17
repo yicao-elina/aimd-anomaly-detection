@@ -476,14 +476,18 @@ def main():
     print("STEP 2+3: Feature Extraction")
     print("="*60)
 
-    print_energy_audit(AIMD_DIRS, label='AIMD training data')
+    _, ref_atm_per_atom = print_energy_audit(AIMD_DIRS, label='AIMD training data')
 
     print("\n[AIMD training data]")
-    X_aimd, meta_aimd, feature_names = load_and_extract(AIMD_DIRS, 'aimd', config)
+    X_aimd, meta_aimd, feature_names = load_and_extract(
+        AIMD_DIRS, 'aimd', config, ref_atm_per_atom=ref_atm_per_atom
+    )
     print(f"\nAIMD: {X_aimd.shape[0]} windows, {X_aimd.shape[1]} features")
 
     print("\n[MLFF test data]")
-    X_mlff, meta_mlff, _ = load_and_extract([MLFF_DIR], 'mlff', config)
+    X_mlff, meta_mlff, _ = load_and_extract(
+        [MLFF_DIR], 'mlff', config, ref_atm_per_atom=ref_atm_per_atom
+    )
     print(f"MLFF: {X_mlff.shape[0]} windows, {X_mlff.shape[1]} features")
 
     # Save features
