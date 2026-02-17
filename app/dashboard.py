@@ -1380,7 +1380,23 @@ def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict,
         # ── Step 3: feature extraction ───────────────────────────────────────
         _step(f"⚙️ Extracting 27 features (window=50, stride=10)…")
         extractor = FeatureExtractor(WindowConfig(window_size=50, stride=10))
-        X_upl, windows = extractor.extract_all_windows(coords, energies, species)
+
+        # Option B: compute empirical energy shift for uploaded file
+        ref_atm = D.get('ref_atm_per_atom', -3.75)
+        e_shift = 0.0
+        shift_note = ''
+        if energies is not None and species:
+            e_shift = compute_file_energy_shift(energies, species, ref_atm)
+            if e_shift != 0.0:
+                shift_note = (
+                    f"  ⚡ Option B energy shift applied: {e_shift:+.1f} eV/frame "
+                    f"(pseudopotential offset corrected; energy_std/trend preserved)"
+                )
+                _step(shift_note)
+
+        X_upl, windows = extractor.extract_all_windows(
+            coords, energies, species, energy_shift=e_shift
+        )
         X_upl = _impute(X_upl)
         _step(f"   → {len(windows)} windows · {X_upl.shape[1]} features")
 
