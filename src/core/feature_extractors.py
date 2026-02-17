@@ -25,6 +25,54 @@ class WindowConfig:
     stride: int = 10
 
 
+def compute_file_energy_shift(
+    energies: np.ndarray,
+    species: List[str],
+    target_atm_per_atom: float,
+) -> float:
+    """
+    Option B empirical energy shift (MACE/NequIP approach).
+
+    Computes a constant per-frame correction (eV) so that this file's mean
+    atomization energy matches `target_atm_per_atom` — the reference value
+    computed from all DFT-compatible training files.
+
+    Derivation
+    ----------
+    We want:  (E_corrected - ref_sum) / N  =  target_atm_per_atom
+    So:       E_corrected  =  target_atm_per_atom * N + ref_sum
+    Shift/frame = E_corrected_mean - E_raw_mean
+               = (target_atm_per_atom * N + ref_sum) - mean(E_raw)
+
+    Properties
+    ----------
+    • energy_mean  → target_atm_per_atom  (systematic offset removed)
+    • energy_std   → unchanged            (frame-to-frame fluctuations preserved)
+    • energy_trend → unchanged            (drift signal preserved)
+
+    Returns 0.0 if the file is already compatible (no shift needed).
+    """
+    from collections import Counter
+    n = len(species)
+    if n == 0:
+        return 0.0
+    valid = energies[~np.isnan(energies)]
+    if len(valid) == 0:
+        return 0.0
+
+    counts: Dict[str, int] = Counter(species)
+    ref_sum = sum(c * ISOLATED_ATOM_ENERGIES.get(el, 0) for el, c in counts.items())
+
+    # Check current atomization energy
+    current_atm = (float(np.mean(valid)) - ref_sum) / n
+    if -20.0 < current_atm < 0.0:
+        return 0.0   # already compatible
+
+    # Compute shift so mean atm energy = target
+    shift = (target_atm_per_atom * n + ref_sum) - float(np.mean(valid))
+    return float(shift)
+
+
 def sliding_windows(n_frames: int, config: WindowConfig) -> List[Tuple[int, int]]:
     """Return list of (start, end) index pairs for sliding windows."""
     windows = []
