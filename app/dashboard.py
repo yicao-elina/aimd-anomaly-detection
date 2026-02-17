@@ -1564,9 +1564,13 @@ if uploaded_file is not None:
                 )
                 st.session_state.uploads[key] = result
                 st.session_state.active_upload = key
+                shift_label = (
+                    f" · ⚡ energy shift {result['energy_shift']:+.0f} eV/frame"
+                    if result.get('energy_shift', 0.0) != 0.0 else ""
+                )
                 _upload_status.update(
                     label=f"✓ {uploaded_file.name} — {result['n_windows']} windows · "
-                          f"{result['anom_rate']:.0%} anomaly",
+                          f"{result['anom_rate']:.0%} anomaly{shift_label}",
                     state="complete", expanded=False,
                 )
             except Exception as exc:
