@@ -136,35 +136,48 @@ def energy_audit(data_dirs) -> dict:
 
 
 def print_energy_audit(dirs, label=''):
+    """
+    Runs the audit, prints the table, and returns (report, ref_atm_per_atom).
+
+    ref_atm_per_atom: mean E_atm/atom across all compatible files.
+        Used as the target for Option B empirical energy shift.
+    """
     report = energy_audit(dirs)
     incompatible = [p for p, v in report.items() if v['compatible'] is False]
+    compatible_atm = [v['atm_per_atom'] for v in report.values()
+                      if v['compatible'] is True and not np.isnan(v['atm_per_atom'])]
+    ref_atm_per_atom = float(np.mean(compatible_atm)) if compatible_atm else -3.75
+
     print(f"\n{'─'*70}")
     print(f"Energy Compatibility Audit{' — ' + label if label else ''}")
     print(f"{'─'*70}")
-    print(f"  {'File':<44} {'E_atm/atom':>12}  Status")
-    print(f"  {'─'*44} {'─'*12}  {'─'*14}")
+    print(f"  Reference E_atm/atom (compatible files): {ref_atm_per_atom:.5f} eV/atom")
+    print(f"  {'File':<44} {'E_atm/atom':>12}  {'Shift/frame':>12}  Status")
+    print(f"  {'─'*44} {'─'*12}  {'─'*12}  {'─'*20}")
     for path, v in report.items():
         fname = Path(path).name
         atm = v['atm_per_atom']
         if v['compatible'] is None:
-            status = '— no energy'
+            status, shift_str = '— no energy', f"{'—':>12}"
         elif v['compatible']:
-            status = '✓ compatible'
+            status, shift_str = '✓ compatible', f"{'0.0':>12}"
         else:
-            status = '✗ INCOMPATIBLE → energy NaN'
+            # Compute the shift that will be applied
+            delta = ref_atm_per_atom - atm
+            shift_str = f"{delta * v['n_atoms']:>12.1f}"
+            status = f'✗ → Option B shift ({delta:+.2f} eV/atom × {v["n_atoms"]})'
         atm_str = f"{atm:12.4f}" if not np.isnan(atm) else f"{'NaN':>12}"
-        print(f"  {fname:<44} {atm_str}  {status}")
+        print(f"  {fname:<44} {atm_str}  {shift_str}  {status}")
+
     if incompatible:
-        print(f"\n  ⚠  {len(incompatible)} incompatible file(s) detected.")
-        print(f"     Energy features will be set to NaN for these files.")
-        print(f"     Structural/dynamical features are retained (POTCAR-independent).")
-        print(f"     If these files are non-redundant, consider Option B (empirical")
-        print(f"     energy shift): subtract per-file mean E_raw/atom from each frame")
-        print(f"     energy before normalisation (matches the MACE/NequIP approach).")
+        print(f"\n  ⚠  {len(incompatible)} incompatible file(s) — applying Option B shift.")
+        print(f"     energy_mean  → shifted to {ref_atm_per_atom:.4f} eV/atom (systematic offset removed)")
+        print(f"     energy_std   → unchanged (frame-to-frame fluctuations preserved)")
+        print(f"     energy_trend → unchanged (drift signal preserved)")
     else:
         print(f"\n  ✓ All files use compatible pseudopotentials.")
     print(f"{'─'*70}\n")
-    return report
+    return report, ref_atm_per_atom
 
 
 # =============================================================================
