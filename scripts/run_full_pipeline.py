@@ -495,7 +495,21 @@ def main():
     np.savez(PROCESSED_DIR / 'features_mlff.npz', X=X_mlff, feature_names=feature_names)
     meta_aimd.to_csv(PROCESSED_DIR / 'meta_aimd.csv', index=False)
     meta_mlff.to_csv(PROCESSED_DIR / 'meta_mlff.csv', index=False)
+
+    # Save energy reference for use by the dashboard upload pipeline
+    energy_ref = {
+        'ref_atm_per_atom': ref_atm_per_atom,
+        'description': (
+            'Mean per-atom atomization energy (eV/atom) across DFT-compatible '
+            'AIMD training files. Used as the Option B empirical energy shift '
+            'target for files with different pseudopotentials.'
+        ),
+    }
+    with open(PROCESSED_DIR / 'energy_ref.json', 'w') as f:
+        json.dump(energy_ref, f, indent=2)
+
     print(f"\n✓ Features saved to {PROCESSED_DIR}")
+    print(f"  energy_ref.json: ref_atm_per_atom = {ref_atm_per_atom:.5f} eV/atom")
 
     # ------------------------------------------------------------------
     # STEP 3b: Visualizations of feature distributions
