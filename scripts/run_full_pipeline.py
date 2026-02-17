@@ -184,8 +184,16 @@ def print_energy_audit(dirs, label=''):
 # STEP 2 + 3: Load trajectories and extract features
 # =============================================================================
 
-def load_and_extract(data_dirs, label: str, config: WindowConfig):
-    """Load all xyz files from dirs and extract windowed features."""
+def load_and_extract(data_dirs, label: str, config: WindowConfig,
+                     ref_atm_per_atom: float = None):
+    """
+    Load all xyz files from dirs and extract windowed features.
+
+    ref_atm_per_atom: Option B reference mean atomization energy (eV/atom)
+        computed from all DFT-compatible files.  When provided, incompatible
+        files receive an empirical energy shift so their energy_std/trend
+        remain informative rather than being set to NaN.
+    """
     loader = TrajectoryLoader()
     extractor = FeatureExtractor(config)
 
@@ -216,7 +224,16 @@ def load_and_extract(data_dirs, label: str, config: WindowConfig):
                 print(f"SKIP (only {n_frames} frames < window {config.window_size})")
                 continue
 
-            feat_matrix, windows = extractor.extract_all_windows(coords, energies, species)
+            # Option B: compute and apply per-file energy shift if needed
+            e_shift = 0.0
+            if ref_atm_per_atom is not None and energies is not None and species:
+                e_shift = compute_file_energy_shift(energies, species, ref_atm_per_atom)
+                if e_shift != 0.0:
+                    print(f"[Option B shift {e_shift:+.1f} eV/frame] ", end='', flush=True)
+
+            feat_matrix, windows = extractor.extract_all_windows(
+                coords, energies, species, energy_shift=e_shift
+            )
             all_feature_matrices.append(feat_matrix)
 
             for (s, e) in windows:
