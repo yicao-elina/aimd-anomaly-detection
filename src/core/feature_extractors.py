@@ -47,8 +47,9 @@ class FeatureExtractor:
 
     def extract_window(
         self,
-        coords: np.ndarray,   # (window_size, n_atoms, 3)
-        energies: Optional[np.ndarray] = None,  # (window_size,)
+        coords: np.ndarray,                      # (window_size, n_atoms, 3)
+        energies: Optional[np.ndarray] = None,   # (window_size,)
+        species: Optional[List[str]] = None,     # length n_atoms, e.g. ['Sb','Sb',...,'Te','Cr']
     ) -> Dict[str, float]:
         """Extract all features from one window. Returns flat dict."""
         feats = {}
@@ -59,7 +60,7 @@ class FeatureExtractor:
         feats.update(self._structural_integrity_features(coords))
         feats.update(self._vacf_features(coords))
         if energies is not None and not np.all(np.isnan(energies)):
-            feats.update(self._energy_features(energies))
+            feats.update(self._energy_features(energies, species))
         else:
             feats.update({
                 'energy_mean': np.nan,
