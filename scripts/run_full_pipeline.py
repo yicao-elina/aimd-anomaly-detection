@@ -443,6 +443,8 @@ def main():
     print("STEP 2+3: Feature Extraction")
     print("="*60)
 
+    print_energy_audit(AIMD_DIRS, label='AIMD training data')
+
     print("\n[AIMD training data]")
     X_aimd, meta_aimd, feature_names = load_and_extract(AIMD_DIRS, 'aimd', config)
     print(f"\nAIMD: {X_aimd.shape[0]} windows, {X_aimd.shape[1]} features")
