@@ -1031,12 +1031,22 @@ def load_all():
     aimd_npz = np.load(PROCESSED_DIR / 'features_aimd.npz', allow_pickle=True)
     mlff_npz = np.load(PROCESSED_DIR / 'features_mlff.npz', allow_pickle=True)
     framework = AnomalyDetectionFramework.load(MODELS_DIR / 'anomaly_framework.pkl')
+
+    # Load energy reference for Option B empirical shift (upload pipeline)
+    energy_ref_path = PROCESSED_DIR / 'energy_ref.json'
+    ref_atm_per_atom = -3.75  # fallback if file missing
+    if energy_ref_path.exists():
+        with open(energy_ref_path) as _f:
+            ref_atm_per_atom = json.load(_f).get('ref_atm_per_atom', -3.75)
+
     return {
         'X_aimd':        aimd_npz['X'],
         'feature_names': list(aimd_npz['feature_names']),
         'meta_aimd':     pd.read_csv(PROCESSED_DIR / 'meta_aimd.csv'),
         'framework':     framework,
         'summary':       json.load(open(PROCESSED_DIR / 'pipeline_summary.json')),
+        # Option B reference atomization energy — used for energy shift in upload
+        'ref_atm_per_atom': ref_atm_per_atom,
         # Default MLFF dataset (from original pipeline run)
         'X_mlff_default':    mlff_npz['X'],
         'meta_mlff_default': pd.read_csv(PROCESSED_DIR / 'meta_mlff.csv'),
