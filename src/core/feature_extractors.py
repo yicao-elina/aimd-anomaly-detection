@@ -122,9 +122,16 @@ class FeatureExtractor:
         coords: np.ndarray,                      # (n_frames, n_atoms, 3)
         energies: Optional[np.ndarray] = None,
         species: Optional[List[str]] = None,     # length n_atoms; constant across frames
+        energy_shift: float = 0.0,               # Option B per-frame correction (eV)
     ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
         """
         Extract features for every sliding window.
+
+        energy_shift: constant added to every frame energy before feature
+            extraction.  Computed by compute_file_energy_shift() for files
+            whose pseudopotentials differ from the training reference set.
+            Has no effect on energy_std or energy_trend (fluctuations preserved).
+
         Returns:
             feature_matrix: (n_windows, n_features) float32 array
             window_indices: list of (start, end) tuples
@@ -136,10 +143,15 @@ class FeatureExtractor:
                 f"window size {self.config.window_size}"
             )
 
+        # Apply Option B energy shift at file level (constant per frame)
+        shifted_energies = None
+        if energies is not None:
+            shifted_energies = energies + energy_shift if energy_shift != 0.0 else energies
+
         all_feats = []
         for start, end in windows:
             w_coords = coords[start:end]
-            w_energies = energies[start:end] if energies is not None else None
+            w_energies = shifted_energies[start:end] if shifted_energies is not None else None
             feats = self.extract_window(w_coords, w_energies, species)
             all_feats.append(feats)
 
