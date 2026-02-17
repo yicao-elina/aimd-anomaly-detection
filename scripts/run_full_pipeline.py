@@ -94,13 +94,14 @@ def load_and_extract(data_dirs, label: str, config: WindowConfig):
 
             coords   = traj['coordinates']   # (n_frames, n_atoms, 3)
             energies = traj['energies']       # (n_frames,)
+            species  = traj.get('species')    # list[str], length n_atoms
             n_frames = coords.shape[0]
 
             if n_frames < config.window_size:
                 print(f"SKIP (only {n_frames} frames < window {config.window_size})")
                 continue
 
-            feat_matrix, windows = extractor.extract_all_windows(coords, energies)
+            feat_matrix, windows = extractor.extract_all_windows(coords, energies, species)
             all_feature_matrices.append(feat_matrix)
 
             for (s, e) in windows:
