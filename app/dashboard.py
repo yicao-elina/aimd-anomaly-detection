@@ -2430,6 +2430,310 @@ elif page == "⚠️ Anomaly Detection":
         st.image(str(p), use_container_width=True)
         st.info(f"Anomaly threshold (95th percentile val error): **{summary.get('lstm_threshold', 'N/A')}**")
 
+    # ══════════════════════════════════════════════════════════════════════
+    # INTERPRETABILITY PANELS (from docs/0217_improvement.md)
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── 1. Explain a Single Window ─────────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("🔬 Explain a Single Window")
+    st.caption(
+        "Select any window to see **why** the detector flagged it: per-feature z-scores, "
+        "detector scores vs thresholds, feature-group radar, and physical root cause."
+    )
+
+    # Default to first anomalous window
+    _anom_idx = np.where(np.asarray(res_sel['anomaly_label'][:n_win]) == 1)[0]
+    _default_win = int(_anom_idx[0]) if len(_anom_idx) > 0 else 0
+
+    explain_win = st.slider(
+        "Select window to explain",
+        min_value=0, max_value=n_win - 1,
+        value=_default_win, key='explain_win_slider',
+    )
+
+    # Compute per-feature z-scores for this window
+    _aimd_m = np.nanmean(X_aimd, axis=0)
+    _aimd_s = np.nanstd(X_aimd, axis=0)
+    _x_win  = X_sel[explain_win]
+    _z_win  = (_x_win - _aimd_m) / (_aimd_s + 1e-10)   # signed z-scores, shape (n_feat,)
+
+    # Detector scores for this window
+    _l1_flag_w   = int(res_sel['l1_flag'][explain_win])
+    _l2_if_flag  = int(res_sel['l2_if_flag'][explain_win])
+    _l2_svm_flag = int(res_sel['l2_svm_flag'][explain_win])
+    _conf_w      = int(res_sel['confidence'][explain_win])
+    _l1_score_w  = float(res_sel['l1_score'][explain_win])
+    _if_score_w  = float(res_sel['l2_if_score'][explain_win])
+    _svm_score_w = float(res_sel['l2_svm_score'][explain_win])
+    _is_anom_w   = bool(res_sel['anomaly_label'][explain_win])
+
+    # IF threshold = 5th percentile of AIMD IF scores (contamination=5%)
+    _if_thresh = float(np.percentile(np.asarray(ra['l2_if_score']), 5))
+
+    _SEV_MAP = {0: "🟢 Normal", 1: "🟡 Borderline", 2: "🟠 Anomaly", 3: "🔴 Catastrophic"}
+    _verdict = _SEV_MAP[_conf_w]
+
+    # Summary metrics row
+    _mc1, _mc2, _mc3, _mc4, _mc5 = st.columns(5)
+    _mc1.metric("Window", f"#{explain_win}")
+    _mc2.metric("L1 stat",   "FLAGGED" if _l1_flag_w else "Normal",
+                help=f"L1 score: {_l1_score_w:.1%} features > 3σ  (threshold: 10%)")
+    _mc3.metric("L2 IF",    "FLAGGED" if _l2_if_flag  else "Normal",
+                help=f"IF score: {_if_score_w:.4f}  |  threshold: {_if_thresh:.4f}")
+    _mc4.metric("L2 SVM",   "FLAGGED" if _l2_svm_flag else "Normal",
+                help=f"SVM score: {_svm_score_w:.4f}  |  threshold: 0")
+    _mc5.metric("Verdict", _verdict)
+
+    st.markdown(
+        f"> **L1 score**: {_l1_score_w:.1%} of features outside 3σ &nbsp;·&nbsp; "
+        f"**IF score**: {_if_score_w:.4f} (threshold {_if_thresh:.4f}) &nbsp;·&nbsp; "
+        f"**SVM score**: {_svm_score_w:.4f} (threshold 0) &nbsp;·&nbsp; "
+        f"**Confidence**: {_conf_w}/3 detectors agree"
+    )
+
+    _exp_left, _exp_right = st.columns([3, 2])
+
+    with _exp_left:
+        # Horizontal bar chart — all features sorted by |z|, color-coded
+        _sort_idx   = np.argsort(np.abs(_z_win))[::-1]
+        _z_sorted   = _z_win[_sort_idx]
+        _names_sort = [feature_names[i] for i in _sort_idx]
+
+        _bar_clrs = []
+        for _z in _z_sorted:
+            if abs(_z) >= 5:   _bar_clrs.append('#C0392B')   # deep red
+            elif abs(_z) >= 3: _bar_clrs.append(RED)
+            elif abs(_z) >= 2: _bar_clrs.append(AMBER)
+            else:              _bar_clrs.append(SAGE)
+
+        fig_exp, ax_exp = mpl_fig(figsize=(9, 8))
+        ax_exp = fig_exp.axes[0]
+        ax_exp.barh(_names_sort, _z_sorted, color=_bar_clrs, alpha=0.88)
+        ax_exp.axvline(0,  color=TEXT,    lw=0.6)
+        ax_exp.axvline( 3, color=RED,     ls='--', lw=1.0, alpha=0.6, label='±3σ threshold')
+        ax_exp.axvline(-3, color=RED,     ls='--', lw=1.0, alpha=0.6)
+        ax_exp.axvline( 5, color='#C0392B', ls=':', lw=1.0, alpha=0.5, label='±5σ critical')
+        ax_exp.axvline(-5, color='#C0392B', ls=':', lw=1.0, alpha=0.5)
+        ax_exp.legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=8)
+        _style_ax(ax_exp,
+                  title=f'Window #{explain_win} — Z-scores (signed: + = higher than AIMD)',
+                  xlabel='Z-score')
+        ax_exp.tick_params(axis='y', labelsize=7.5, labelcolor=SUB)
+        st.pyplot(fig_exp, use_container_width=True); plt.close(fig_exp)
+
+    with _exp_right:
+        # Feature group analysis
+        import math as _math
+        _FEAT_GROUPS = {
+            'Displacement': ['disp_mean','disp_std','disp_skew','disp_kurtosis',
+                             'disp_max','disp_median','disp_p95'],
+            'Dynamics':     ['rms_velocity','crest_factor','impulse_factor',
+                             'frame_variance','anisotropy'],
+            'Frequency':    ['dominant_freq','spectral_entropy','spectral_peak_ratio'],
+            'Diffusion':    ['msd_mean','msd_std','msd_final','msd_slope'],
+            'Energy':       ['energy_mean','energy_std','energy_trend'],
+            'Structural':   ['min_interatomic_dist','rdf_first_peak_pos','rdf_first_peak_height'],
+            'VACF':         ['vacf_initial_decay','vacf_zero_crossing'],
+        }
+        _PHYS = {
+            'Displacement': (
+                "**Catastrophic atomic displacement** — atoms move far beyond DFT-predicted "
+                "step sizes. The MLFF predicts wrong forces causing runaway atomic motion."
+            ),
+            'Dynamics': (
+                "**Incorrect force magnitude/direction** — MLFF energy surface is too flat "
+                "or too rough, producing wrong velocities and acceleration patterns."
+            ),
+            'Frequency': (
+                "**Phonon frequency mismatch** — PES curvature is wrong near equilibrium, "
+                "causing spurious high-frequency oscillations or missing vibrational modes."
+            ),
+            'Diffusion': (
+                "**Diffusion behavior mismatch** — MLFF predicts wrong atomic mobility. "
+                "Possible cause: incorrect energy barriers or migration mechanisms."
+            ),
+            'Energy': (
+                "**Energy conservation failure** — non-conservative force prediction "
+                "causing systematic drift. Hallmark of a non-physical force field."
+            ),
+            'Structural': (
+                "**Bond-length / structural order deviation** — interatomic distances and "
+                "local coordination differ from DFT. May indicate bond breaking or phase change."
+            ),
+            'VACF': (
+                "**Vibrational dynamics anomaly** — velocity autocorrelation deviates "
+                "significantly. Possible atomic collision or structural collapse onset."
+            ),
+        }
+
+        _grp_z = {}
+        for _grp, _feats in _FEAT_GROUPS.items():
+            _idxs = [feature_names.index(f) for f in _feats if f in feature_names]
+            _grp_z[_grp] = float(np.mean(np.abs(_z_win[_idxs]))) if _idxs else 0.0
+
+        _groups = list(_grp_z.keys())
+        _vals   = [_grp_z[g] for g in _groups]
+        _N      = len(_groups)
+        _angles = [n / _N * 2 * _math.pi for n in range(_N)] + [0]
+        _vplot  = _vals + [_vals[0]]
+
+        fig_rad, ax_rad = plt.subplots(
+            figsize=(4, 4), subplot_kw={'projection': 'polar'}, facecolor=SURFACE
+        )
+        ax_rad.set_facecolor(SURFACE)
+        ax_rad.set_theta_offset(_math.pi / 2)
+        ax_rad.set_theta_direction(-1)
+        _rc = RED if _is_anom_w else CYAN
+        ax_rad.plot(_angles, _vplot, color=_rc, lw=2)
+        ax_rad.fill(_angles, _vplot, color=_rc, alpha=0.22)
+        ax_rad.set_xticks(_angles[:-1])
+        ax_rad.set_xticklabels(_groups, fontsize=8, color=TEXT)
+        ax_rad.tick_params(axis='y', colors=MUTED, labelsize=6)
+        _max_val = max(max(_vals) * 1.25, 4.0)
+        ax_rad.set_ylim(0, _max_val)
+        ax_rad.axhline(3, color=RED, ls='--', lw=0.8, alpha=0.55)
+        ax_rad.set_title('Feature Group |Z-scores|', color=TEXT, fontsize=10, pad=15)
+        ax_rad.grid(True, color=BORDER_C, alpha=0.35)
+        for _sp in ax_rad.spines.values(): _sp.set_edgecolor(BORDER_C)
+        st.pyplot(fig_rad, use_container_width=True); plt.close(fig_rad)
+
+        # Physical root-cause interpretation
+        _top_grp = max(_grp_z, key=_grp_z.get)
+        _top_z   = _grp_z[_top_grp]
+        _sev_icon = '🔴' if _top_z > 5 else ('🟠' if _top_z > 3 else ('🟡' if _top_z > 2 else '🟢'))
+        st.markdown(f"**{_sev_icon} Primary driver: {_top_grp}** (mean |z| = {_top_z:.1f}σ)")
+        st.info(_PHYS.get(_top_grp, ""))
+
+        # Group summary table
+        _grp_rows = []
+        for _g in _groups:
+            _zv = _grp_z[_g]
+            _ico = '🔴' if _zv > 5 else ('🟠' if _zv > 3 else ('🟡' if _zv > 2 else '🟢'))
+            _grp_rows.append({'Group': _g, '': _ico, 'Mean |Z|': f'{_zv:.2f}'})
+        st.dataframe(
+            pd.DataFrame(_grp_rows).set_index('Group'),
+            use_container_width=True, height=240,
+        )
+
+    # ── 2. Detector Score Distributions ────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("📊 Detector Score Distributions — AIMD vs Upload")
+    st.caption(
+        "Histogram overlap shows whether the upload occupies the same region of feature space "
+        "as the AIMD baseline. Non-overlapping → genuine MLFF failure; overlapping → possible "
+        "threshold calibration issue."
+    )
+
+    _if_aimd  = np.asarray(ra['l2_if_score'])
+    _if_upl   = np.asarray(rm['l2_if_score'])
+    _svm_aimd = np.asarray(ra['l2_svm_score'])
+    _svm_upl  = np.asarray(rm['l2_svm_score'])
+    _if_thr   = float(np.percentile(_if_aimd, 5))
+    _sep      = (np.mean(_if_aimd) - np.mean(_if_upl)) / (np.std(_if_aimd) + 1e-10)
+
+    fig_dist, axes_dist = plt.subplots(1, 2, figsize=(13, 4), facecolor=SURFACE,
+                                       constrained_layout=True)
+    for ax in axes_dist: _style_ax(ax)
+
+    axes_dist[0].hist(_if_aimd, bins=40, alpha=0.65, density=True, color=CYAN,
+                      label='AIMD (training)', edgecolor='none')
+    axes_dist[0].hist(_if_upl,  bins=40, alpha=0.65, density=True, color=RED,
+                      label=f'Upload: {upload_name[:20]}', edgecolor='none')
+    axes_dist[0].axvline(_if_thr, color='#C0392B', ls='--', lw=1.5,
+                         label=f'IF threshold ({_if_thr:.3f})')
+    axes_dist[0].legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=8)
+    _style_ax(axes_dist[0],
+              title=f'Isolation Forest Scores  (separation: {_sep:.1f}σ)',
+              xlabel='IF score (more negative → more anomalous)', ylabel='Density')
+
+    axes_dist[1].hist(_svm_aimd, bins=40, alpha=0.65, density=True, color=CYAN,
+                      label='AIMD (training)', edgecolor='none')
+    axes_dist[1].hist(_svm_upl,  bins=40, alpha=0.65, density=True, color=RED,
+                      label=f'Upload: {upload_name[:20]}', edgecolor='none')
+    axes_dist[1].axvline(0, color='#C0392B', ls='--', lw=1.5, label='SVM threshold (0)')
+    axes_dist[1].legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=8)
+    _style_ax(axes_dist[1], title='One-Class SVM Scores',
+              xlabel='SVM score (negative → outside learned boundary)', ylabel='Density')
+
+    st.pyplot(fig_dist, use_container_width=True); plt.close(fig_dist)
+
+    if abs(_sep) > 5:
+        st.error(
+            f"**Completely separated ({_sep:.1f}σ)** — The upload occupies a fundamentally "
+            "different region of feature space. This is NOT a threshold calibration issue: "
+            "the MLFF trajectory is genuinely anomalous relative to DFT dynamics."
+        )
+    elif abs(_sep) > 2:
+        st.warning(
+            f"**Significantly separated ({_sep:.1f}σ)** — Upload shows meaningful deviation "
+            "from AIMD. Some threshold relaxation could reduce false-positive rate, but "
+            "genuine physical differences are present."
+        )
+    else:
+        st.success(
+            f"**Distributions overlap ({_sep:.1f}σ)** — Upload is statistically similar to "
+            "AIMD. Anomalies likely reflect threshold calibration rather than genuine failure."
+        )
+
+    # ── 3. PCA Feature Space ────────────────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("🗺️ PCA Feature Space — Where Each Window Lives")
+    st.caption(
+        "2D projection of all 27 features via PCA. "
+        "Separated clusters confirm genuine MLFF deviation from AIMD physics. "
+        "The ★ marks the currently selected window."
+    )
+
+    from sklearn.decomposition import PCA as _PCA
+    from sklearn.preprocessing import StandardScaler as _SS
+
+    _Xa = _impute(X_aimd.copy())
+    _Xu = _impute(X_sel.copy())
+    _Xc = np.vstack([_Xa, _Xu])
+    _ss = _SS()
+    _Xcs = _ss.fit_transform(_Xc)
+    _pca = _PCA(n_components=2, random_state=42)
+    _Xp  = _pca.fit_transform(_Xcs)
+    _na  = len(_Xa)
+
+    _pca_a = _Xp[:_na]
+    _pca_u = _Xp[_na:]
+    _anom_u = np.asarray(res_sel['anomaly_label'][:len(_Xu)])
+    _pca_n = _pca_u[_anom_u == 0]
+    _pca_ab = _pca_u[_anom_u == 1]
+    _ev = _pca.explained_variance_ratio_
+
+    fig_pca, ax_pca = mpl_fig(figsize=(10, 6))
+    ax_pca = fig_pca.axes[0]
+    ax_pca.scatter(_pca_a[:, 0], _pca_a[:, 1],   alpha=0.35, s=8,
+                   color=CYAN, label=f'AIMD ({_na} windows)')
+    if len(_pca_n) > 0:
+        ax_pca.scatter(_pca_n[:, 0], _pca_n[:, 1],  alpha=0.5, s=10,
+                       color=SAGE, marker='s', label=f'Upload — Normal ({len(_pca_n)})')
+    if len(_pca_ab) > 0:
+        ax_pca.scatter(_pca_ab[:, 0], _pca_ab[:, 1], alpha=0.6, s=12,
+                       color=RED, marker='^', label=f'Upload — Anomaly ({len(_pca_ab)})')
+    # Star for selected window
+    _sel_pt = _Xp[_na + explain_win]
+    ax_pca.scatter([_sel_pt[0]], [_sel_pt[1]], color=GOLD, s=150, zorder=6,
+                   marker='*', label=f'Selected window #{explain_win}')
+    _style_ax(ax_pca,
+              title='PCA Feature Space: AIMD vs Upload',
+              xlabel=f'PC1 ({100*_ev[0]:.1f}% variance)',
+              ylabel=f'PC2 ({100*_ev[1]:.1f}% variance)')
+    ax_pca.legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=9)
+    st.pyplot(fig_pca, use_container_width=True); plt.close(fig_pca)
+
+    _var_total = 100 * (_ev[0] + _ev[1])
+    if _var_total < 50:
+        st.caption(
+            f"PC1 + PC2 explain {_var_total:.0f}% of variance. The full separation is "
+            "visible in 27-dimensional space — the 2D projection may understate the gap."
+        )
+    else:
+        st.caption(f"PC1 + PC2 explain {_var_total:.0f}% of variance — a faithful 2D summary.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — AIMD vs Upload Comparison
