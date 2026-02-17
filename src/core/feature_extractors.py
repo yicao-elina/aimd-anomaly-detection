@@ -330,12 +330,9 @@ class FeatureExtractor:
             n_atoms_fallback = max(energies.size, 1)
             norm_energies = valid / n_atoms_fallback
 
-        # Physical plausibility check: E_atm/atom for a bound solid must be negative.
-        # A positive value indicates the file was calculated with DIFFERENT
-        # pseudopotentials than the isolated-atom references (incompatible energy scales),
-        # most commonly seen in "bulk" trajectories merged from different DFT setups.
-        # In that case, return NaN so the imputer uses the training-set mean rather
-        # than a spurious +900 eV/atom value that would corrupt the anomaly scores.
+        # Residual plausibility guard: if the result is still unphysically positive
+        # (e.g. an energy_shift was not supplied for this file), return NaN so the
+        # imputer uses the training-set mean rather than a spurious value.
         mean_atm = float(np.mean(norm_energies))
         if mean_atm > 0.0:
             return {'energy_mean': np.nan, 'energy_std': np.nan, 'energy_trend': np.nan}
