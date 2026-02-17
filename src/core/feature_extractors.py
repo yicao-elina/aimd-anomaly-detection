@@ -9,6 +9,15 @@ from scipy import signal, stats
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 
+# Isolated atom DFT reference energies (eV) from data/raw/reference/isolated_atom.xyz
+# Used to compute per-atom atomization energy:
+#   E_atm/atom = (E_tot - Σ_i N_i * E0_i) / N_total
+ISOLATED_ATOM_ENERGIES: Dict[str, float] = {
+    'Cr': -2270.518789079322,
+    'Sb': -1908.633351763048,
+    'Te': -2369.398259284361,
+}
+
 
 @dataclass
 class WindowConfig:
