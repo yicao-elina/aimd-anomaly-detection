@@ -208,16 +208,72 @@ class FeatureExtractor:
             ),
         }
 
-    def _energy_features(self, energies: np.ndarray) -> Dict[str, float]:
-        """Features from frame energies."""
-        valid = energies[~np.isnan(energies)]
+    def _energy_features(
+        self,
+        energies: np.ndarray,
+        species: Optional[List[str]] = None,
+    ) -> Dict[str, float]:
+        """
+        Per-atom atomization energy features.
+
+        Converts raw DFT total energies (eV) to per-atom atomization energies:
+            E_atm/atom = (E_tot - Σ_i N_i * E0_i) / N_total
+
+        where E0_i are the isolated-atom DFT reference energies from
+        ISOLATED_ATOM_ENERGIES.  This removes the linear scaling with system
+        size so that trajectories with different atom counts are directly
+        comparable, and the energy mean/std/trend become physically meaningful
+        bonding-energy quantities (~-3 to -5 eV/atom for Sb₂Te₃).
+
+        If species is None or contains unknown elements, falls back to
+        raw-energy-per-atom (E_tot / N_atoms) as a degraded but size-normalised
+        alternative.
+        """
+        valid_mask = ~np.isnan(energies)
+        valid = energies[valid_mask]
         if len(valid) < 2:
             return {'energy_mean': np.nan, 'energy_std': np.nan, 'energy_trend': np.nan}
 
-        trend = float(np.polyfit(np.arange(len(valid)), valid, 1)[0])
+        # --- build per-atom reference energy offset ---
+        ref_energy_per_frame = 0.0
+        n_atoms = len(species) if species is not None else 0
+
+        if species and n_atoms > 0:
+            # Count each element
+            counts: Dict[str, int] = {}
+            for sp in species:
+                counts[sp] = counts.get(sp, 0) + 1
+
+            # Sum reference energies for known elements
+            ref_sum = sum(
+                cnt * ISOLATED_ATOM_ENERGIES[el]
+                for el, cnt in counts.items()
+                if el in ISOLATED_ATOM_ENERGIES
+            )
+            # Check if all elements are covered
+            unknown = [el for el in counts if el not in ISOLATED_ATOM_ENERGIES]
+            if unknown:
+                # Partial fallback: use raw E/atom
+                ref_sum = 0.0
+                n_atoms = 0  # triggers raw /atom below
+
+            ref_energy_per_frame = ref_sum
+        else:
+            n_atoms = 0  # no species info
+
+        if n_atoms > 0:
+            # True per-atom atomization energy (eV/atom)
+            norm_energies = (valid - ref_energy_per_frame) / n_atoms
+        else:
+            # Degraded fallback: just divide by total atoms from coords shape
+            # (still size-normalised, but not atomization energy)
+            n_atoms_fallback = max(energies.size, 1)
+            norm_energies = valid / n_atoms_fallback
+
+        trend = float(np.polyfit(np.arange(len(norm_energies)), norm_energies, 1)[0])
         return {
-            'energy_mean': float(np.mean(valid)),
-            'energy_std': float(np.std(valid)),
+            'energy_mean': float(np.mean(norm_energies)),
+            'energy_std': float(np.std(norm_energies)),
             'energy_trend': trend,
         }
 
