@@ -38,7 +38,10 @@ from sklearn.inspection import permutation_importance
 from sklearn.ensemble import RandomForestClassifier
 
 from src.core.loaders import TrajectoryLoader, load_all_trajectories
-from src.core.feature_extractors import FeatureExtractor, WindowConfig
+from src.core.feature_extractors import (
+    FeatureExtractor, WindowConfig,
+    ISOLATED_ATOM_ENERGIES, compute_file_energy_shift,
+)
 from src.core.detectors import AnomalyDetectionFramework
 from src.core.models import LSTMAnomalyDetector
 
@@ -66,11 +69,131 @@ MLFF_DIR = ROOT / 'data' / 'raw' / 'mlff'
 
 
 # =============================================================================
+# ENERGY COMPATIBILITY AUDIT
+# =============================================================================
+
+def energy_audit(data_dirs) -> dict:
+    """
+    Audit energy compatibility across all XYZ files in the given directories.
+
+    DFT total energies depend on the choice of pseudopotential (POTCAR in VASP).
+    Files computed with different pseudopotentials cannot share the same E0
+    isolated-atom references and will produce unphysical atomization energies
+    when normalised together.
+
+    Strategy:
+        • "compatible"   — E_atm/atom in (-20, 0) eV/atom  → use energy features
+        • "incompatible" — E_atm/atom outside that range    → energy → NaN (imputed)
+        • "no energy"    — no energies in file               → energy → NaN
+
+    For incompatible files, structural/dynamical features are still valid and
+    are retained in training.  Energy features for those files are set to NaN
+    by the _energy_features plausibility guard in feature_extractors.py.
+
+    Option B (empirical shift) — use when incompatible data is NOT redundant:
+        The per-file mean E_raw/atom is shifted to match the reference group mean.
+        This is the MACE/NequIP approach of fitting isolated-atom E0 per dataset.
+        Implementation sketch (not run automatically):
+
+            ref_mean_raw   = mean(E_raw/atom) across all compatible files
+            shift_i        = mean(E_raw/atom, file_i) - ref_mean_raw
+            E_corrected    = E_raw_i - shift_i * N_atoms_i
+            → then compute E_atm/atom with the shared E0 references
+
+    Returns a dict mapping file path → {'raw_per_atom', 'atm_per_atom', 'compatible'}
+    """
+    from collections import Counter
+    loader = TrajectoryLoader()
+    report = {}
+
+    for d in data_dirs:
+        for xyz in sorted(Path(d).glob('*.xyz')):
+            try:
+                traj = loader.load(str(xyz))
+            except Exception:
+                continue
+            sp  = traj.get('species', [])
+            en  = traj['energies']
+            valid = en[~np.isnan(en)]
+            if len(valid) == 0 or len(sp) == 0:
+                report[str(xyz)] = {'raw_per_atom': np.nan, 'atm_per_atom': np.nan,
+                                    'compatible': None, 'n_atoms': len(sp)}
+                continue
+            n = len(sp)
+            counts = Counter(sp)
+            ref = sum(c * ISOLATED_ATOM_ENERGIES.get(el, 0) for el, c in counts.items())
+            raw_per_atom = float(np.mean(valid)) / n
+            atm_per_atom = (float(np.mean(valid)) - ref) / n
+            compatible = (-20.0 < atm_per_atom < 0.0)
+            report[str(xyz)] = {
+                'raw_per_atom': raw_per_atom,
+                'atm_per_atom': atm_per_atom,
+                'compatible': compatible,
+                'n_atoms': n,
+                'species': dict(counts),
+            }
+    return report
+
+
+def print_energy_audit(dirs, label=''):
+    """
+    Runs the audit, prints the table, and returns (report, ref_atm_per_atom).
+
+    ref_atm_per_atom: mean E_atm/atom across all compatible files.
+        Used as the target for Option B empirical energy shift.
+    """
+    report = energy_audit(dirs)
+    incompatible = [p for p, v in report.items() if v['compatible'] is False]
+    compatible_atm = [v['atm_per_atom'] for v in report.values()
+                      if v['compatible'] is True and not np.isnan(v['atm_per_atom'])]
+    ref_atm_per_atom = float(np.mean(compatible_atm)) if compatible_atm else -3.75
+
+    print(f"\n{'─'*70}")
+    print(f"Energy Compatibility Audit{' — ' + label if label else ''}")
+    print(f"{'─'*70}")
+    print(f"  Reference E_atm/atom (compatible files): {ref_atm_per_atom:.5f} eV/atom")
+    print(f"  {'File':<44} {'E_atm/atom':>12}  {'Shift/frame':>12}  Status")
+    print(f"  {'─'*44} {'─'*12}  {'─'*12}  {'─'*20}")
+    for path, v in report.items():
+        fname = Path(path).name
+        atm = v['atm_per_atom']
+        if v['compatible'] is None:
+            status, shift_str = '— no energy', f"{'—':>12}"
+        elif v['compatible']:
+            status, shift_str = '✓ compatible', f"{'0.0':>12}"
+        else:
+            # Compute the shift that will be applied
+            delta = ref_atm_per_atom - atm
+            shift_str = f"{delta * v['n_atoms']:>12.1f}"
+            status = f'✗ → Option B shift ({delta:+.2f} eV/atom × {v["n_atoms"]})'
+        atm_str = f"{atm:12.4f}" if not np.isnan(atm) else f"{'NaN':>12}"
+        print(f"  {fname:<44} {atm_str}  {shift_str}  {status}")
+
+    if incompatible:
+        print(f"\n  ⚠  {len(incompatible)} incompatible file(s) — applying Option B shift.")
+        print(f"     energy_mean  → shifted to {ref_atm_per_atom:.4f} eV/atom (systematic offset removed)")
+        print(f"     energy_std   → unchanged (frame-to-frame fluctuations preserved)")
+        print(f"     energy_trend → unchanged (drift signal preserved)")
+    else:
+        print(f"\n  ✓ All files use compatible pseudopotentials.")
+    print(f"{'─'*70}\n")
+    return report, ref_atm_per_atom
+
+
+# =============================================================================
 # STEP 2 + 3: Load trajectories and extract features
 # =============================================================================
 
-def load_and_extract(data_dirs, label: str, config: WindowConfig):
-    """Load all xyz files from dirs and extract windowed features."""
+def load_and_extract(data_dirs, label: str, config: WindowConfig,
+                     ref_atm_per_atom: float = None):
+    """
+    Load all xyz files from dirs and extract windowed features.
+
+    ref_atm_per_atom: Option B reference mean atomization energy (eV/atom)
+        computed from all DFT-compatible files.  When provided, incompatible
+        files receive an empirical energy shift so their energy_std/trend
+        remain informative rather than being set to NaN.
+    """
     loader = TrajectoryLoader()
     extractor = FeatureExtractor(config)
 
@@ -94,13 +217,23 @@ def load_and_extract(data_dirs, label: str, config: WindowConfig):
 
             coords   = traj['coordinates']   # (n_frames, n_atoms, 3)
             energies = traj['energies']       # (n_frames,)
+            species  = traj.get('species')    # list[str], length n_atoms
             n_frames = coords.shape[0]
 
             if n_frames < config.window_size:
                 print(f"SKIP (only {n_frames} frames < window {config.window_size})")
                 continue
 
-            feat_matrix, windows = extractor.extract_all_windows(coords, energies)
+            # Option B: compute and apply per-file energy shift if needed
+            e_shift = 0.0
+            if ref_atm_per_atom is not None and energies is not None and species:
+                e_shift = compute_file_energy_shift(energies, species, ref_atm_per_atom)
+                if e_shift != 0.0:
+                    print(f"[Option B shift {e_shift:+.1f} eV/frame] ", end='', flush=True)
+
+            feat_matrix, windows = extractor.extract_all_windows(
+                coords, energies, species, energy_shift=e_shift
+            )
             all_feature_matrices.append(feat_matrix)
 
             for (s, e) in windows:
@@ -343,12 +476,18 @@ def main():
     print("STEP 2+3: Feature Extraction")
     print("="*60)
 
+    _, ref_atm_per_atom = print_energy_audit(AIMD_DIRS, label='AIMD training data')
+
     print("\n[AIMD training data]")
-    X_aimd, meta_aimd, feature_names = load_and_extract(AIMD_DIRS, 'aimd', config)
+    X_aimd, meta_aimd, feature_names = load_and_extract(
+        AIMD_DIRS, 'aimd', config, ref_atm_per_atom=ref_atm_per_atom
+    )
     print(f"\nAIMD: {X_aimd.shape[0]} windows, {X_aimd.shape[1]} features")
 
     print("\n[MLFF test data]")
-    X_mlff, meta_mlff, _ = load_and_extract([MLFF_DIR], 'mlff', config)
+    X_mlff, meta_mlff, _ = load_and_extract(
+        [MLFF_DIR], 'mlff', config, ref_atm_per_atom=ref_atm_per_atom
+    )
     print(f"MLFF: {X_mlff.shape[0]} windows, {X_mlff.shape[1]} features")
 
     # Save features
@@ -356,7 +495,21 @@ def main():
     np.savez(PROCESSED_DIR / 'features_mlff.npz', X=X_mlff, feature_names=feature_names)
     meta_aimd.to_csv(PROCESSED_DIR / 'meta_aimd.csv', index=False)
     meta_mlff.to_csv(PROCESSED_DIR / 'meta_mlff.csv', index=False)
+
+    # Save energy reference for use by the dashboard upload pipeline
+    energy_ref = {
+        'ref_atm_per_atom': ref_atm_per_atom,
+        'description': (
+            'Mean per-atom atomization energy (eV/atom) across DFT-compatible '
+            'AIMD training files. Used as the Option B empirical energy shift '
+            'target for files with different pseudopotentials.'
+        ),
+    }
+    with open(PROCESSED_DIR / 'energy_ref.json', 'w') as f:
+        json.dump(energy_ref, f, indent=2)
+
     print(f"\n✓ Features saved to {PROCESSED_DIR}")
+    print(f"  energy_ref.json: ref_atm_per_atom = {ref_atm_per_atom:.5f} eV/atom")
 
     # ------------------------------------------------------------------
     # STEP 3b: Visualizations of feature distributions

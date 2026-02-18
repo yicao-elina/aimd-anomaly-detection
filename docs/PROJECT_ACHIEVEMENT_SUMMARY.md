@@ -223,6 +223,7 @@ results/reports/
 - LLM component (`llm_analyst.py` + Page 5 dashboard) — added after Steps 2–8 ✅
 - `CLAUDE.md` + `/anomaly-demo` skill — project memory + generalisation tool ✅
 - Qualcomm interview context updated ✅
+- **Dashboard v2 polish (session 2026-02-14→15)** — cream/JHU theme, interactive table, Plotly distributions, 3D viewer ✅
 
 ---
 
@@ -232,4 +233,117 @@ The MLFF trajectory shows `disp_median = 17.05 Å` vs AIMD `0.003 Å` (**z = +72
 
 ---
 
-*Generated 2026-02-13 · See [[CLAUDE.md]] for AI assistant context*
+---
+
+## Session 2 Achievements (2026-02-14 → 15)
+
+> [!tip] Dashboard v2 — major UI/UX overhaul + new features
+
+### Theme Migration
+
+- Migrated CSS from dark blue (`#040D1E`) to **JHU institutional palette** (Heritage Blue · Spirit Blue · Homewood Green · Gold · Red · Orange)
+- All CSS `:root` variables, inline Python style strings, and matplotlib shorthand aliases (`CYAN/RED/GREEN/AMBER/PURPLE`) updated throughout
+- Fonts: **DM Serif Display** (display) · **DM Mono** (code/labels) · **DM Sans** (body) via Google Fonts
+
+### Custom HTML Components
+
+| Component | Description |
+| --------- | ----------- |
+| `inject_metrics_bar()` | Metrics strip with JHU-blue-top-border cards — used on Pages 1, 3, 4 |
+| `inject_status_monitor()` | SVG animated detector rings (L1, L2a, L2b) with pulse animation for high-anomaly states — Page 3 |
+| `inject_feature_table()` | Custom HTML/CSS/JS sortable table with inline split z-score bars, live filter, severity row tinting — replaces broken Pandas Styler |
+
+### Interactive Distributions Tab (Page 2, Tab 1)
+
+- **Plotly 6** grouped bar chart + violin chart (toggleable)
+- Hover tooltips: mean, std, window count, z-score, 120-char feature description
+- Feature glossary expander (5 categories with physics descriptions)
+- Chart controls: top-N slider, chart mode radio, log scale, z-normalize
+- LLM Q&A expander using `OllamaAnalyst.mechanism_analysis()`
+- Fixed Plotly 6 color bug: all colors converted from 8-digit hex to explicit `rgba()` strings
+
+### 3D Molecular Trajectory Viewer (Page 1 — new)
+
+- **3Dmol.js** WebGL client-side rendering via `streamlit.components.v1.html()`
+- Atom colors: Sb = `#8B5CF6` (purple) · Te = `#06B6D4` (teal) · Cr = `#EF4444` (red)
+- Unit-cell box drawn from `Lattice="..."` extended-XYZ comment (12 cylinder edges)
+- Multi-frame XYZ sampled to **75 frames** via `np.linspace`; embedded as JSON in HTML
+- **Play/Pause** + **frame slider** + **speed selector** (0.5× 1× 2× 4×) + **reset view** controls
+- **AIMD side:** file selector dropdown → `@st.cache_data` load of any `data/raw/**/*.xyz`
+- **Upload side:** sampled coords/species/lattice stored in session dict by `_run_upload_pipeline()`
+- Side-by-side layout, embedded below trajectory tables on Page 1
+
+### Bug Fixes
+
+| Bug | Fix |
+| --- | --- |
+| `ValueError: All arrays must be of the same length` (Page 4) | Use `_n = len(rm['anomaly_label'])` as reference length for all arrays |
+| `ValueError: Invalid value '#00000073'` (Plotly 6) | All `error_x.color` / `fillcolor` converted to `rgba()` strings |
+| `NameError: feat_labels` in violin branch | Moved `feat_labels` definition above chart-mode branch split |
+| `st.dataframe(styled)` silently empty | Replaced with `inject_feature_table()` custom HTML component |
+
+### GitHub & Infrastructure
+
+- Repo created: `github.com/yicao-elina/aimd-anomaly-detection`
+- Full `README.md` written (key results table, quick start, architecture, feature table, 5-page description)
+- `requirements.txt` updated with `plotly>=5.0.0`
+- Auto-commit hook: `.claude/settings.json` PostToolUse → `git commit -m 'auto: <filename>'` on every `.py`/`.html` edit
+
+---
+
+## Session 3 Achievements (2026-02-15 → 16)
+
+> [!tip] State-of-the-art detection upgrades + Active Learning page + HPC scripts
+
+### 3D Trajectory Viewer Fix
+
+- **Root cause identified**: `viewer.setCurrentModel()` is not a public 3Dmol.js API; `addModelsAsFrames` overlays all 75 frames simultaneously
+- **Fix**: Complete rewrite using `viewer.removeAllModels()` + `addModel()` + `addAtoms()` per frame change; `getView()`/`setView()` preserves camera orientation
+- Frame slider now shows **original timestep numbers** (e.g. `step 4321 / 10000`) after down-sampling via `np.linspace`
+
+### Data Overview Table Fix
+
+- **Root cause**: JHU white CSS background + Streamlit canvas renderer white text → invisible cells
+- **Fix**: `inject_overview_table()` custom HTML component with explicit `color: #1a1a1a` on all cells; JS sort-on-click, live filter, bypass of Streamlit canvas entirely
+
+### Page 6 — 🔬 Active Learning (new page)
+
+| Tab | Content |
+| --- | ------- |
+| Candidate Selection | Severity tiers (Catastrophic/High/Warning/Normal), stability onset time τ_s, top-k candidate table, CSV download |
+| AL Configuration | MACE architecture + QE DFT + SLURM hyperparameter sliders; saves to session |
+| HPC Script Generator | Generates & downloads `config_al.yaml`, `run_al_loop.py` (~300 lines), `submit_al.sh` |
+| Pre-Test Pipeline | Simulates AL loop on small dataset; σ histogram with σ_lo/σ_hi boundaries; convergence assessment |
+
+### Standalone HPC Script Module
+
+`scripts/al_loop_files.py` — validated standalone module (YAML, Python AST, 12 `#SBATCH` directives):
+- **`config_al.yaml`**: 6 sections (system, mace, committee×4seeds, qe, active_learning, slurm)
+- **`run_al_loop.py`**: Full MACE+QE DP-GEN loop with `--dry-run`, per-iteration JSON summaries, convergence check
+- **`submit_al.sh`**: SLURM script with conda/module fallback, GPU setup, pre-flight checks, post-run summary
+
+### Detection Improvements — 5 New Physics Features (22 → 27)
+
+Added to `src/core/feature_extractors.py` following recommendations from `MLFF Training_ Anomaly Detection Workflow.md`:
+
+| Category | Features | Physical Motivation |
+| -------- | -------- | ------------------- |
+| **Structural Integrity** | `min_interatomic_dist` | Atomic clash / Pauli repulsion violation |
+| | `rdf_first_peak_pos` | Bond-length drift / structural phase change |
+| | `rdf_first_peak_height` | Order→disorder transition |
+| **VACF** | `vacf_initial_decay` | Stiff high-frequency vibrations / erratic motion |
+| | `vacf_zero_crossing` | Catastrophic drift signature (no zero crossing) |
+
+> [!warning] Pipeline Rerun Required
+> The new features are implemented but `features_aimd.npz` / `features_mlff.npz` were saved with 22 features.
+> Run `scripts/run_full_pipeline.py` to regenerate with all 27 features.
+
+### Key Design Decisions
+
+- Structural integrity: O(n²) pairwise distance matrix computed once per window using vectorised broadcast; upper-triangle pairs for RDF to avoid double-counting
+- VACF: `np.einsum('taj,taj->ta', vel[:T-lag], vel[lag:T])` for efficient inner product without Python loops over atoms
+- Both new feature groups are species-agnostic (aggregate over all atoms)
+
+---
+
+*Updated 2026-02-16 · See [[CLAUDE.md]] for AI assistant context*

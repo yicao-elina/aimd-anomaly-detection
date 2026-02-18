@@ -35,6 +35,15 @@ env/
 data/raw/
 data/synthetic/
 
+# ── Processed feature matrices — INCLUDED for deployment (< 2 MB total) ──────
+# data/processed/*.npz     ← unblocked: needed at runtime on cloud deployments
+# data/processed/*.csv     ← unblocked
+# data/processed/*.json    ← unblocked
+
+# ── Trained model binaries — INCLUDED for deployment (< 2 MB total) ──────────
+# results/models/*.pkl     ← unblocked
+# results/models/*.pt      ← unblocked
+
 # ── Temporary / session files ─────────────────────────────────────────────────
 *.tmp
 

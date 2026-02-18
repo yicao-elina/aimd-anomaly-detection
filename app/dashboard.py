@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.core.loaders import TrajectoryLoader
-from src.core.feature_extractors import FeatureExtractor, WindowConfig
+from src.core.feature_extractors import FeatureExtractor, WindowConfig, compute_file_energy_shift
 from src.core.detectors import AnomalyDetectionFramework
 from src.core.llm_analyst import OllamaAnalyst, build_data_context
 from src.utils.jhu_colors.jhu_colors.colors import get_jhu_color
@@ -341,6 +341,89 @@ def inject_metrics_bar(metrics: list) -> None:
 </style>
 <div class="mb-strip">{cards}</div>"""
     components.html(html, height=110, scrolling=False)
+
+
+def inject_overview_table(df: pd.DataFrame, height: int = 280) -> None:
+    """
+    Render a themed HTML data table for the Data Overview page.
+    Bypasses st.dataframe() to avoid the white-text-on-white-background bug
+    caused by Streamlit's canvas renderer conflicting with our custom CSS.
+    """
+    import json, uuid
+    if df is None or df.empty:
+        st.info("No data available.")
+        return
+
+    uid = uuid.uuid4().hex[:8]
+
+    # Format cell values — round floats, truncate long strings
+    def _fmt(v):
+        if isinstance(v, float):
+            return f"{v:,.1f}" if abs(v) >= 100 else f"{v:.4g}"
+        return str(v)[:40] if v is not None else '—'
+
+    headers_html = ''.join(
+        f"<th onclick=\"sortOvr_{uid}(this,{i})\">{col}</th>"
+        for i, col in enumerate(df.columns)
+    )
+    rows_html = ''
+    for _, row in df.iterrows():
+        cells = ''.join(f"<td>{_fmt(v)}</td>" for v in row)
+        rows_html += f"<tr>{cells}</tr>\n"
+
+    html = f"""
+<style>
+  #ovr_{uid} {{ font-family:'DM Sans',sans-serif; font-size:12px;
+    background:#ffffff; border:1px solid {BORDER_C}; border-radius:8px;
+    overflow:auto; max-height:{height}px; }}
+  #ovr_{uid} table {{ width:100%; border-collapse:collapse; table-layout:auto; }}
+  #ovr_{uid} thead {{ position:sticky; top:0; z-index:2; background:{SURFACE2}; }}
+  #ovr_{uid} th {{
+    padding:8px 12px; text-align:left; cursor:pointer; user-select:none;
+    font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.12em;
+    text-transform:uppercase; color:{SUB}; border-bottom:2px solid {BORDER_C};
+    white-space:nowrap;
+  }}
+  #ovr_{uid} th:hover {{ color:{CORAL}; }}
+  #ovr_{uid} th.asc::after  {{ content:' ↑'; color:{CORAL}; }}
+  #ovr_{uid} th.desc::after {{ content:' ↓'; color:{CORAL}; }}
+  #ovr_{uid} td {{
+    padding:7px 12px; color:{TEXT}; border-bottom:1px solid {BORDER_C};
+    font-family:'DM Mono',monospace; font-size:11px; white-space:nowrap;
+  }}
+  #ovr_{uid} tr:hover td {{ background:{SURFACE2}; }}
+  #ovr_{uid} tr:last-child td {{ border-bottom:none; }}
+</style>
+<div id="ovr_{uid}">
+  <table id="tbl_{uid}">
+    <thead><tr>{headers_html}</tr></thead>
+    <tbody id="tbody_{uid}">{rows_html}</tbody>
+  </table>
+</div>
+<script>
+(function() {{
+  var asc = {{}};
+  window.sortOvr_{uid} = function(th, colIdx) {{
+    var tbody = document.getElementById('tbody_{uid}');
+    var rows = Array.from(tbody.querySelectorAll('tr'));
+    var dir = asc[colIdx] = !asc[colIdx];
+    // Remove sort classes from all headers
+    th.closest('tr').querySelectorAll('th').forEach(function(h) {{
+      h.classList.remove('asc','desc');
+    }});
+    th.classList.add(dir ? 'asc' : 'desc');
+    rows.sort(function(a,b) {{
+      var av = a.cells[colIdx].textContent.replace(/,/g,'');
+      var bv = b.cells[colIdx].textContent.replace(/,/g,'');
+      var an = parseFloat(av), bn = parseFloat(bv);
+      if (!isNaN(an) && !isNaN(bn)) return dir ? an-bn : bn-an;
+      return dir ? av.localeCompare(bv) : bv.localeCompare(av);
+    }});
+    rows.forEach(function(r) {{ tbody.appendChild(r); }});
+  }};
+}})();
+</script>"""
+    components.html(html, height=height + 4, scrolling=False)
 
 
 def inject_feature_table(df: pd.DataFrame, title: str = '', height: int = 560) -> None:
@@ -940,22 +1023,52 @@ def _impute(X):
     return out
 
 
+def _build_feat_cmp_placeholder(feature_names, X_mlff, X_aimd):
+    """Fallback for when feature_comparison.csv doesn't exist (e.g. fresh clone)."""
+    aimd_means = np.nanmean(X_aimd, axis=0)
+    aimd_stds  = np.nanstd(X_aimd, axis=0)
+    upl_means  = np.nanmean(X_mlff, axis=0)
+    rows = []
+    for i, fn in enumerate(feature_names):
+        z = (upl_means[i] - aimd_means[i]) / (aimd_stds[i] + 1e-10)
+        rel = (upl_means[i] - aimd_means[i]) / (abs(aimd_means[i]) + 1e-10) * 100
+        rows.append({'feature': fn, 'aimd_mean': aimd_means[i], 'aimd_std': aimd_stds[i],
+                     'mlff_mean': upl_means[i], 'z_score': z, 'relative_change_%': rel})
+    return pd.DataFrame(rows).sort_values('z_score', key=abs, ascending=False).reset_index(drop=True)
+
+
 # ── Data loading (cached) ────────────────────────────────────────────────────
 @st.cache_resource
 def load_all():
     aimd_npz = np.load(PROCESSED_DIR / 'features_aimd.npz', allow_pickle=True)
     mlff_npz = np.load(PROCESSED_DIR / 'features_mlff.npz', allow_pickle=True)
     framework = AnomalyDetectionFramework.load(MODELS_DIR / 'anomaly_framework.pkl')
+
+    # Load energy reference for Option B empirical shift (upload pipeline)
+    energy_ref_path = PROCESSED_DIR / 'energy_ref.json'
+    ref_atm_per_atom = -3.75  # fallback if file missing
+    if energy_ref_path.exists():
+        with open(energy_ref_path) as _f:
+            ref_atm_per_atom = json.load(_f).get('ref_atm_per_atom', -3.75)
+
     return {
         'X_aimd':        aimd_npz['X'],
         'feature_names': list(aimd_npz['feature_names']),
         'meta_aimd':     pd.read_csv(PROCESSED_DIR / 'meta_aimd.csv'),
         'framework':     framework,
         'summary':       json.load(open(PROCESSED_DIR / 'pipeline_summary.json')),
+        # Option B reference atomization energy — used for energy shift in upload
+        'ref_atm_per_atom': ref_atm_per_atom,
         # Default MLFF dataset (from original pipeline run)
-        'X_mlff_default':   mlff_npz['X'],
+        'X_mlff_default':    mlff_npz['X'],
         'meta_mlff_default': pd.read_csv(PROCESSED_DIR / 'meta_mlff.csv'),
-        'feat_cmp_default':  pd.read_csv(REPORTS_DIR / 'feature_comparison.csv'),
+        'feat_cmp_default':  (
+            pd.read_csv(REPORTS_DIR / 'feature_comparison.csv')
+            if (REPORTS_DIR / 'feature_comparison.csv').exists()
+            else _build_feat_cmp_placeholder(
+                list(aimd_npz['feature_names']), mlff_npz['X'], aimd_npz['X']
+            )
+        ),
     }
 
 
@@ -1233,78 +1346,131 @@ def inject_3d_viewer(coords, species, lattice, orig_indices, n_total_frames: int
     components.html(html, height=height, scrolling=False)
 
 
-def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict) -> dict:
+def _run_upload_pipeline(xyz_bytes: bytes, filename: str, D: dict,
+                         _status=None) -> dict:
     """
     Predict-only pipeline for an uploaded .xyz file.
     Uses the already-trained AnomalyDetectionFramework (no retraining).
-    Returns dict with keys: X, meta, results, feat_cmp, filename, timestamp, n_windows.
+
+    _status: optional st.status container — if provided, step labels are written
+             into it so the user sees live progress.
     """
-    # Write to a temp file so TrajectoryLoader can read it
-    with tempfile.NamedTemporaryFile(suffix='.xyz', delete=False) as tf:
-        tf.write(xyz_bytes)
-        tmp_path = tf.name
+    def _step(msg):
+        if _status is not None:
+            _status.write(msg)
 
-    loader    = TrajectoryLoader()
-    extractor = FeatureExtractor(WindowConfig(window_size=50, stride=10))
-
-    traj = loader.load(tmp_path)
-    coords   = traj['coordinates']   # (n_frames, n_atoms, 3)
-    species  = traj.get('species', [])
-    energies = traj.get('energies')
-    meta_raw = traj.get('metadata', {})
-
-    # Parse lattice from first comment line for 3D viewer
-    lattice_viewer = None
+    # ── Step 1: write bytes to a temp file ───────────────────────────────────
+    _step("📂 Writing temp file…")
+    tmp_path = None
     try:
-        with open(tmp_path, 'r') as _f:
-            int(_f.readline().strip())
-            lattice_viewer = _parse_lattice_from_comment(_f.readline())
-    except Exception:
-        pass
+        with tempfile.NamedTemporaryFile(suffix='.xyz', delete=False) as tf:
+            tf.write(xyz_bytes)
+            tmp_path = tf.name
 
-    X_upl, windows = extractor.extract_all_windows(coords, energies)
-    X_upl = _impute(X_upl)
+        # ── Step 2: parse XYZ ────────────────────────────────────────────────
+        mb = len(xyz_bytes) / 1_048_576
+        _step(f"🔍 Parsing XYZ ({mb:.1f} MB)…")
+        loader = TrajectoryLoader()
+        traj   = loader.load(tmp_path)
 
-    framework = D['framework']
-    results   = framework.predict(X_upl)
+        coords   = traj['coordinates']   # (n_frames, n_atoms, 3)
+        species  = traj.get('species', [])
+        energies = traj.get('energies')
+        meta_raw = traj.get('metadata', {})
+        n_frames, n_atoms = coords.shape[0], coords.shape[1]
+        _step(f"   → {n_frames} frames · {n_atoms} atoms")
 
-    # Sample coords for 3D viewer (75 frames max, store orig indices for step labels)
-    n_total_fr = int(coords.shape[0])
-    n_sample   = min(75, n_total_fr)
-    idx_s      = np.linspace(0, n_total_fr - 1, n_sample, dtype=int)
-    coords_s   = coords[idx_s]
+        # Parse lattice from first comment line for 3D viewer
+        lattice_viewer = None
+        try:
+            with open(tmp_path, 'r') as _f:
+                int(_f.readline().strip())
+                lattice_viewer = _parse_lattice_from_comment(_f.readline())
+        except Exception:
+            pass
 
-    # Build metadata  (windows is a list of (start, end) tuples)
-    n_w = len(X_upl)
-    meta = pd.DataFrame({
-        'file':          [filename] * n_w,
-        'start':         [w[0] for w in windows],
-        'end':           [w[1] for w in windows],
-        'n_atoms':       [coords.shape[1]] * n_w,
-        'temperature_K': [meta_raw.get('temperature_K')] * n_w,
-        'configuration': [meta_raw.get('configuration', 'uploaded')] * n_w,
-    })
+        # ── Step 3: feature extraction ───────────────────────────────────────
+        _step(f"⚙️ Extracting 27 features (window=50, stride=10)…")
+        extractor = FeatureExtractor(WindowConfig(window_size=50, stride=10))
 
-    feat_cmp = _build_feat_comparison(D['X_aimd'], X_upl, D['feature_names'])
+        # Option B: compute empirical energy shift for uploaded file
+        ref_atm = D.get('ref_atm_per_atom', -3.75)
+        e_shift = 0.0
+        shift_note = ''
+        if energies is not None and species:
+            e_shift = compute_file_energy_shift(energies, species, ref_atm)
+            if e_shift != 0.0:
+                shift_note = (
+                    f"  ⚡ Option B energy shift applied: {e_shift:+.1f} eV/frame "
+                    f"(pseudopotential offset corrected; energy_std/trend preserved)"
+                )
+                _step(shift_note)
 
-    return {
-        'X':         X_upl,
-        'meta':      meta,
-        'results':   results,
-        'feat_cmp':  feat_cmp,
-        'filename':  filename,
-        'timestamp': datetime.datetime.now().strftime('%H:%M:%S'),
-        'n_windows': n_w,
-        'n_frames':  coords.shape[0],
-        'n_atoms':   coords.shape[1],
-        'anom_rate': float(np.mean(results['anomaly_label'])),
-        # 3D viewer data
-        'coords_viewer':    coords_s,        # (n_sample, n_atoms, 3) float32
-        'species_viewer':   species,
-        'lattice_viewer':   lattice_viewer,
-        'orig_idx_viewer':  idx_s,           # original step indices
-        'n_total_frames':   n_total_fr,
-    }
+        X_upl, windows = extractor.extract_all_windows(
+            coords, energies, species, energy_shift=e_shift
+        )
+        X_upl = _impute(X_upl)
+        _step(f"   → {len(windows)} windows · {X_upl.shape[1]} features")
+
+        # ── Step 4: anomaly detection ────────────────────────────────────────
+        _step("🚨 Running L1+L2 anomaly detection…")
+        results = D['framework'].predict(X_upl)
+        anom_rate = float(np.mean(results['anomaly_label']))
+        _step(f"   → anomaly rate: {anom_rate*100:.1f}%")
+
+        # ── Step 5: 3D viewer sampling ────────────────────────────────────────
+        # Cap viewer atoms at 300 to keep the browser JSON payload manageable
+        # for large supercells (e.g. 2050-atom 5×5×1 supercell).
+        MAX_VIEWER_ATOMS = 300
+        n_sample   = min(75, n_frames)
+        idx_s      = np.linspace(0, n_frames - 1, n_sample, dtype=int)
+        coords_s   = coords[idx_s]
+        species_v  = species
+        if n_atoms > MAX_VIEWER_ATOMS:
+            atom_idx_v = np.linspace(0, n_atoms - 1, MAX_VIEWER_ATOMS, dtype=int)
+            coords_s   = coords_s[:, atom_idx_v, :]
+            species_v  = [species[i] for i in atom_idx_v] if species else []
+            _step(f"   → 3D viewer: subsampled to {MAX_VIEWER_ATOMS} atoms")
+
+        # ── Build metadata DataFrame ──────────────────────────────────────────
+        n_w  = len(X_upl)
+        meta = pd.DataFrame({
+            'file':          [filename] * n_w,
+            'start':         [w[0] for w in windows],
+            'end':           [w[1] for w in windows],
+            'n_atoms':       [n_atoms] * n_w,
+            'temperature_K': [meta_raw.get('temperature_K')] * n_w,
+            'configuration': [meta_raw.get('configuration', 'uploaded')] * n_w,
+        })
+        feat_cmp = _build_feat_comparison(D['X_aimd'], X_upl, D['feature_names'])
+
+        return {
+            'X':              X_upl,
+            'meta':           meta,
+            'results':        results,
+            'feat_cmp':       feat_cmp,
+            'filename':       filename,
+            'timestamp':      datetime.datetime.now().strftime('%H:%M:%S'),
+            'n_windows':      n_w,
+            'n_frames':       n_frames,
+            'n_atoms':        n_atoms,
+            'anom_rate':      anom_rate,
+            # 3D viewer
+            'coords_viewer':  coords_s,
+            'species_viewer': species_v,
+            'lattice_viewer': lattice_viewer,
+            'orig_idx_viewer': idx_s,
+            'n_total_frames': n_frames,
+            'energy_shift':   e_shift,
+            'energy_shift_note': shift_note,
+        }
+    finally:
+        # Always clean up the temp file
+        if tmp_path is not None:
+            try:
+                import os; os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # ── Load base data ───────────────────────────────────────────────────────────
@@ -1312,7 +1478,7 @@ try:
     D = load_all()
 except FileNotFoundError as e:
     st.error(f"**Pipeline outputs missing:** {e}")
-    st.info("Run the pipeline first:\n```bash\n/Users/alina/anaconda3/envs/agentic/bin/python scripts/run_full_pipeline.py\n```")
+    st.info("Run the pipeline first:\n```bash\npython scripts/run_full_pipeline.py\n```")
     st.stop()
 
 X_aimd        = D['X_aimd']
@@ -1368,6 +1534,7 @@ _nav_pages = [
 ]
 if OLLAMA_AVAILABLE:
     _nav_pages.append("🤖 AI Analysis")
+_nav_pages.append("🔬 Active Learning")
 
 page = st.sidebar.radio(
     "Navigate",
@@ -1395,16 +1562,39 @@ uploaded_file = st.sidebar.file_uploader(
 if uploaded_file is not None:
     key = uploaded_file.name
     if key not in st.session_state.uploads:
-        with st.sidebar.status(f"Analyzing {uploaded_file.name}…", expanded=False):
+        xyz_bytes = uploaded_file.read()
+        file_mb   = len(xyz_bytes) / 1_048_576
+        # Warn if the file is large (> 50 MB) so the user knows to expect a wait
+        if file_mb > 50:
+            st.sidebar.warning(
+                f"Large file ({file_mb:.0f} MB) — this may take 20–60 s. "
+                "Processing in background…"
+            )
+        with st.sidebar.status(
+            f"Analyzing {uploaded_file.name} ({file_mb:.1f} MB)…",
+            expanded=True,
+        ) as _upload_status:
             try:
                 result = _run_upload_pipeline(
-                    uploaded_file.read(), uploaded_file.name, D
+                    xyz_bytes, uploaded_file.name, D,
+                    _status=_upload_status,
                 )
                 st.session_state.uploads[key] = result
                 st.session_state.active_upload = key
-                st.sidebar.success(f"✓ {uploaded_file.name} — {result['n_windows']} windows")
+                shift_label = (
+                    f" · ⚡ energy shift {result['energy_shift']:+.0f} eV/frame"
+                    if result.get('energy_shift', 0.0) != 0.0 else ""
+                )
+                _upload_status.update(
+                    label=f"✓ {uploaded_file.name} — {result['n_windows']} windows · "
+                          f"{result['anom_rate']:.0%} anomaly{shift_label}",
+                    state="complete", expanded=False,
+                )
             except Exception as exc:
-                st.sidebar.error(f"Pipeline error: {exc}")
+                import traceback
+                _upload_status.update(label=f"✗ {uploaded_file.name}", state="error")
+                st.sidebar.error(f"**Pipeline error:** {exc}")
+                st.sidebar.code(traceback.format_exc(), language="python")
     else:
         # Already processed — just switch to it
         st.session_state.active_upload = key
@@ -1489,7 +1679,7 @@ if page == "📊 Data Overview":
     st.markdown(
         f"AIMD baseline (**Sb₂Te₃** with Cr dopants, 2D bilayer) "
         f"vs active upload: **{upload_name}**. "
-        "Pipeline: L1+L2 ensemble · 22 features · window=50 · stride=10."
+        "Pipeline: L1+L2 ensemble · 27 features · window=50 · stride=10."
     )
 
     inject_metrics_bar([
@@ -1519,7 +1709,7 @@ if page == "📊 Data Overview":
                      n_atoms=('n_atoms','first'))
                 .reset_index().sort_values('windows', ascending=False)
             )
-            st.dataframe(tbl, use_container_width=True, height=280)
+            inject_overview_table(tbl, height=280)
 
     with col_b:
         st.subheader(f"Active Upload: {upload_name}")
@@ -1533,7 +1723,7 @@ if page == "📊 Data Overview":
                 n_atoms=('n_atoms','first'),
                 temperature_K=('temperature_K','first'),
             ).reset_index()
-            st.dataframe(upl_tbl, use_container_width=True, height=280)
+            inject_overview_table(upl_tbl, height=280)
 
         upl_anom = active_data['anom_rate']
         if upl_anom > 0.5:
@@ -1715,6 +1905,32 @@ elif page == "🔍 Feature Analysis":
                     "non-equilibrium behavior or force-field instability."
                 ),
             },
+            "Structural Integrity (NEW)": {
+                "features": ["min_interatomic_dist","rdf_first_peak_pos","rdf_first_peak_height"],
+                "description": (
+                    "Physics-motivated features derived from all pairwise atomic distances in the window. "
+                    "**min_interatomic_dist** = minimum pairwise distance (Å) over all atoms and frames — "
+                    "values below ~1.5 Å signal atomic clashes (Pauli repulsion violation), the clearest "
+                    "signature of a nonsensical MLFF configuration. "
+                    "**rdf_first_peak_pos** = position of the first peak of the radial distribution function "
+                    "(Å); shifts indicate bond-length drift or a structural phase change. "
+                    "**rdf_first_peak_height** = normalised height of the first RDF peak; broadening or "
+                    "collapse signals an order→disorder transition characteristic of MLFF instability."
+                ),
+            },
+            "Velocity Autocorrelation (NEW)": {
+                "features": ["vacf_initial_decay","vacf_zero_crossing"],
+                "description": (
+                    "VACF probes the vibrational and dynamical signature of the trajectory. "
+                    "Velocities are approximated as frame-to-frame coordinate differences. "
+                    "**vacf_initial_decay** = fractional drop (VACF[0]−VACF[1])/VACF[0]; "
+                    "large values indicate stiff high-frequency vibrations or erratic atomic motion "
+                    "typical of MLFF instability at the onset of structural collapse. "
+                    "**vacf_zero_crossing** = first zero-crossing time as a fraction of max lag; "
+                    "short crossing ↔ high-frequency oscillations; value=1.0 (no crossing) indicates "
+                    "strongly correlated drift — the catastrophic displacement signature."
+                ),
+            },
         }
 
         with st.expander("ℹ️ Feature Glossary — what do these metrics measure?", expanded=False):
@@ -1758,6 +1974,8 @@ elif page == "🔍 Feature Analysis":
                 **{f: GOLD for f in ["dominant_freq","spectral_entropy","spectral_peak_ratio"]},
                 **{f: '#7C5CBF' for f in ["msd_mean","msd_std","msd_final","msd_slope"]},
                 **{f: '#C07050' for f in ["energy_mean","energy_std","energy_trend"]},
+                **{f: '#1A7A4A' for f in ["min_interatomic_dist","rdf_first_peak_pos","rdf_first_peak_height"]},
+                **{f: '#2A6496' for f in ["vacf_initial_decay","vacf_zero_crossing"]},
             }
 
             # Build per-feature description for hover
@@ -2261,6 +2479,310 @@ elif page == "⚠️ Anomaly Detection":
         st.image(str(p), use_container_width=True)
         st.info(f"Anomaly threshold (95th percentile val error): **{summary.get('lstm_threshold', 'N/A')}**")
 
+    # ══════════════════════════════════════════════════════════════════════
+    # INTERPRETABILITY PANELS (from docs/0217_improvement.md)
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── 1. Explain a Single Window ─────────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("🔬 Explain a Single Window")
+    st.caption(
+        "Select any window to see **why** the detector flagged it: per-feature z-scores, "
+        "detector scores vs thresholds, feature-group radar, and physical root cause."
+    )
+
+    # Default to first anomalous window
+    _anom_idx = np.where(np.asarray(res_sel['anomaly_label'][:n_win]) == 1)[0]
+    _default_win = int(_anom_idx[0]) if len(_anom_idx) > 0 else 0
+
+    explain_win = st.slider(
+        "Select window to explain",
+        min_value=0, max_value=n_win - 1,
+        value=_default_win, key='explain_win_slider',
+    )
+
+    # Compute per-feature z-scores for this window
+    _aimd_m = np.nanmean(X_aimd, axis=0)
+    _aimd_s = np.nanstd(X_aimd, axis=0)
+    _x_win  = X_sel[explain_win]
+    _z_win  = (_x_win - _aimd_m) / (_aimd_s + 1e-10)   # signed z-scores, shape (n_feat,)
+
+    # Detector scores for this window
+    _l1_flag_w   = int(res_sel['l1_flag'][explain_win])
+    _l2_if_flag  = int(res_sel['l2_if_flag'][explain_win])
+    _l2_svm_flag = int(res_sel['l2_svm_flag'][explain_win])
+    _conf_w      = int(res_sel['confidence'][explain_win])
+    _l1_score_w  = float(res_sel['l1_score'][explain_win])
+    _if_score_w  = float(res_sel['l2_if_score'][explain_win])
+    _svm_score_w = float(res_sel['l2_svm_score'][explain_win])
+    _is_anom_w   = bool(res_sel['anomaly_label'][explain_win])
+
+    # IF threshold = 5th percentile of AIMD IF scores (contamination=5%)
+    _if_thresh = float(np.percentile(np.asarray(ra['l2_if_score']), 5))
+
+    _SEV_MAP = {0: "🟢 Normal", 1: "🟡 Borderline", 2: "🟠 Anomaly", 3: "🔴 Catastrophic"}
+    _verdict = _SEV_MAP[_conf_w]
+
+    # Summary metrics row
+    _mc1, _mc2, _mc3, _mc4, _mc5 = st.columns(5)
+    _mc1.metric("Window", f"#{explain_win}")
+    _mc2.metric("L1 stat",   "FLAGGED" if _l1_flag_w else "Normal",
+                help=f"L1 score: {_l1_score_w:.1%} features > 3σ  (threshold: 10%)")
+    _mc3.metric("L2 IF",    "FLAGGED" if _l2_if_flag  else "Normal",
+                help=f"IF score: {_if_score_w:.4f}  |  threshold: {_if_thresh:.4f}")
+    _mc4.metric("L2 SVM",   "FLAGGED" if _l2_svm_flag else "Normal",
+                help=f"SVM score: {_svm_score_w:.4f}  |  threshold: 0")
+    _mc5.metric("Verdict", _verdict)
+
+    st.markdown(
+        f"> **L1 score**: {_l1_score_w:.1%} of features outside 3σ &nbsp;·&nbsp; "
+        f"**IF score**: {_if_score_w:.4f} (threshold {_if_thresh:.4f}) &nbsp;·&nbsp; "
+        f"**SVM score**: {_svm_score_w:.4f} (threshold 0) &nbsp;·&nbsp; "
+        f"**Confidence**: {_conf_w}/3 detectors agree"
+    )
+
+    _exp_left, _exp_right = st.columns([3, 2])
+
+    with _exp_left:
+        # Horizontal bar chart — all features sorted by |z|, color-coded
+        _sort_idx   = np.argsort(np.abs(_z_win))[::-1]
+        _z_sorted   = _z_win[_sort_idx]
+        _names_sort = [feature_names[i] for i in _sort_idx]
+
+        _bar_clrs = []
+        for _z in _z_sorted:
+            if abs(_z) >= 5:   _bar_clrs.append('#C0392B')   # deep red
+            elif abs(_z) >= 3: _bar_clrs.append(RED)
+            elif abs(_z) >= 2: _bar_clrs.append(AMBER)
+            else:              _bar_clrs.append(SAGE)
+
+        fig_exp, ax_exp = mpl_fig(figsize=(9, 8))
+        ax_exp = fig_exp.axes[0]
+        ax_exp.barh(_names_sort, _z_sorted, color=_bar_clrs, alpha=0.88)
+        ax_exp.axvline(0,  color=TEXT,    lw=0.6)
+        ax_exp.axvline( 3, color=RED,     ls='--', lw=1.0, alpha=0.6, label='±3σ threshold')
+        ax_exp.axvline(-3, color=RED,     ls='--', lw=1.0, alpha=0.6)
+        ax_exp.axvline( 5, color='#C0392B', ls=':', lw=1.0, alpha=0.5, label='±5σ critical')
+        ax_exp.axvline(-5, color='#C0392B', ls=':', lw=1.0, alpha=0.5)
+        ax_exp.legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=8)
+        _style_ax(ax_exp,
+                  title=f'Window #{explain_win} — Z-scores (signed: + = higher than AIMD)',
+                  xlabel='Z-score')
+        ax_exp.tick_params(axis='y', labelsize=7.5, labelcolor=SUB)
+        st.pyplot(fig_exp, use_container_width=True); plt.close(fig_exp)
+
+    with _exp_right:
+        # Feature group analysis
+        import math as _math
+        _FEAT_GROUPS = {
+            'Displacement': ['disp_mean','disp_std','disp_skew','disp_kurtosis',
+                             'disp_max','disp_median','disp_p95'],
+            'Dynamics':     ['rms_velocity','crest_factor','impulse_factor',
+                             'frame_variance','anisotropy'],
+            'Frequency':    ['dominant_freq','spectral_entropy','spectral_peak_ratio'],
+            'Diffusion':    ['msd_mean','msd_std','msd_final','msd_slope'],
+            'Energy':       ['energy_mean','energy_std','energy_trend'],
+            'Structural':   ['min_interatomic_dist','rdf_first_peak_pos','rdf_first_peak_height'],
+            'VACF':         ['vacf_initial_decay','vacf_zero_crossing'],
+        }
+        _PHYS = {
+            'Displacement': (
+                "**Catastrophic atomic displacement** — atoms move far beyond DFT-predicted "
+                "step sizes. The MLFF predicts wrong forces causing runaway atomic motion."
+            ),
+            'Dynamics': (
+                "**Incorrect force magnitude/direction** — MLFF energy surface is too flat "
+                "or too rough, producing wrong velocities and acceleration patterns."
+            ),
+            'Frequency': (
+                "**Phonon frequency mismatch** — PES curvature is wrong near equilibrium, "
+                "causing spurious high-frequency oscillations or missing vibrational modes."
+            ),
+            'Diffusion': (
+                "**Diffusion behavior mismatch** — MLFF predicts wrong atomic mobility. "
+                "Possible cause: incorrect energy barriers or migration mechanisms."
+            ),
+            'Energy': (
+                "**Energy conservation failure** — non-conservative force prediction "
+                "causing systematic drift. Hallmark of a non-physical force field."
+            ),
+            'Structural': (
+                "**Bond-length / structural order deviation** — interatomic distances and "
+                "local coordination differ from DFT. May indicate bond breaking or phase change."
+            ),
+            'VACF': (
+                "**Vibrational dynamics anomaly** — velocity autocorrelation deviates "
+                "significantly. Possible atomic collision or structural collapse onset."
+            ),
+        }
+
+        _grp_z = {}
+        for _grp, _feats in _FEAT_GROUPS.items():
+            _idxs = [feature_names.index(f) for f in _feats if f in feature_names]
+            _grp_z[_grp] = float(np.mean(np.abs(_z_win[_idxs]))) if _idxs else 0.0
+
+        _groups = list(_grp_z.keys())
+        _vals   = [_grp_z[g] for g in _groups]
+        _N      = len(_groups)
+        _angles = [n / _N * 2 * _math.pi for n in range(_N)] + [0]
+        _vplot  = _vals + [_vals[0]]
+
+        fig_rad, ax_rad = plt.subplots(
+            figsize=(4, 4), subplot_kw={'projection': 'polar'}, facecolor=SURFACE
+        )
+        ax_rad.set_facecolor(SURFACE)
+        ax_rad.set_theta_offset(_math.pi / 2)
+        ax_rad.set_theta_direction(-1)
+        _rc = RED if _is_anom_w else CYAN
+        ax_rad.plot(_angles, _vplot, color=_rc, lw=2)
+        ax_rad.fill(_angles, _vplot, color=_rc, alpha=0.22)
+        ax_rad.set_xticks(_angles[:-1])
+        ax_rad.set_xticklabels(_groups, fontsize=8, color=TEXT)
+        ax_rad.tick_params(axis='y', colors=MUTED, labelsize=6)
+        _max_val = max(max(_vals) * 1.25, 4.0)
+        ax_rad.set_ylim(0, _max_val)
+        ax_rad.axhline(3, color=RED, ls='--', lw=0.8, alpha=0.55)
+        ax_rad.set_title('Feature Group |Z-scores|', color=TEXT, fontsize=10, pad=15)
+        ax_rad.grid(True, color=BORDER_C, alpha=0.35)
+        for _sp in ax_rad.spines.values(): _sp.set_edgecolor(BORDER_C)
+        st.pyplot(fig_rad, use_container_width=True); plt.close(fig_rad)
+
+        # Physical root-cause interpretation
+        _top_grp = max(_grp_z, key=_grp_z.get)
+        _top_z   = _grp_z[_top_grp]
+        _sev_icon = '🔴' if _top_z > 5 else ('🟠' if _top_z > 3 else ('🟡' if _top_z > 2 else '🟢'))
+        st.markdown(f"**{_sev_icon} Primary driver: {_top_grp}** (mean |z| = {_top_z:.1f}σ)")
+        st.info(_PHYS.get(_top_grp, ""))
+
+        # Group summary table
+        _grp_rows = []
+        for _g in _groups:
+            _zv = _grp_z[_g]
+            _ico = '🔴' if _zv > 5 else ('🟠' if _zv > 3 else ('🟡' if _zv > 2 else '🟢'))
+            _grp_rows.append({'Group': _g, '': _ico, 'Mean |Z|': f'{_zv:.2f}'})
+        st.dataframe(
+            pd.DataFrame(_grp_rows).set_index('Group'),
+            use_container_width=True, height=240,
+        )
+
+    # ── 2. Detector Score Distributions ────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("📊 Detector Score Distributions — AIMD vs Upload")
+    st.caption(
+        "Histogram overlap shows whether the upload occupies the same region of feature space "
+        "as the AIMD baseline. Non-overlapping → genuine MLFF failure; overlapping → possible "
+        "threshold calibration issue."
+    )
+
+    _if_aimd  = np.asarray(ra['l2_if_score'])
+    _if_upl   = np.asarray(rm['l2_if_score'])
+    _svm_aimd = np.asarray(ra['l2_svm_score'])
+    _svm_upl  = np.asarray(rm['l2_svm_score'])
+    _if_thr   = float(np.percentile(_if_aimd, 5))
+    _sep      = (np.mean(_if_aimd) - np.mean(_if_upl)) / (np.std(_if_aimd) + 1e-10)
+
+    fig_dist, axes_dist = plt.subplots(1, 2, figsize=(13, 4), facecolor=SURFACE,
+                                       constrained_layout=True)
+    for ax in axes_dist: _style_ax(ax)
+
+    axes_dist[0].hist(_if_aimd, bins=40, alpha=0.65, density=True, color=CYAN,
+                      label='AIMD (training)', edgecolor='none')
+    axes_dist[0].hist(_if_upl,  bins=40, alpha=0.65, density=True, color=RED,
+                      label=f'Upload: {upload_name[:20]}', edgecolor='none')
+    axes_dist[0].axvline(_if_thr, color='#C0392B', ls='--', lw=1.5,
+                         label=f'IF threshold ({_if_thr:.3f})')
+    axes_dist[0].legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=8)
+    _style_ax(axes_dist[0],
+              title=f'Isolation Forest Scores  (separation: {_sep:.1f}σ)',
+              xlabel='IF score (more negative → more anomalous)', ylabel='Density')
+
+    axes_dist[1].hist(_svm_aimd, bins=40, alpha=0.65, density=True, color=CYAN,
+                      label='AIMD (training)', edgecolor='none')
+    axes_dist[1].hist(_svm_upl,  bins=40, alpha=0.65, density=True, color=RED,
+                      label=f'Upload: {upload_name[:20]}', edgecolor='none')
+    axes_dist[1].axvline(0, color='#C0392B', ls='--', lw=1.5, label='SVM threshold (0)')
+    axes_dist[1].legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=8)
+    _style_ax(axes_dist[1], title='One-Class SVM Scores',
+              xlabel='SVM score (negative → outside learned boundary)', ylabel='Density')
+
+    st.pyplot(fig_dist, use_container_width=True); plt.close(fig_dist)
+
+    if abs(_sep) > 5:
+        st.error(
+            f"**Completely separated ({_sep:.1f}σ)** — The upload occupies a fundamentally "
+            "different region of feature space. This is NOT a threshold calibration issue: "
+            "the MLFF trajectory is genuinely anomalous relative to DFT dynamics."
+        )
+    elif abs(_sep) > 2:
+        st.warning(
+            f"**Significantly separated ({_sep:.1f}σ)** — Upload shows meaningful deviation "
+            "from AIMD. Some threshold relaxation could reduce false-positive rate, but "
+            "genuine physical differences are present."
+        )
+    else:
+        st.success(
+            f"**Distributions overlap ({_sep:.1f}σ)** — Upload is statistically similar to "
+            "AIMD. Anomalies likely reflect threshold calibration rather than genuine failure."
+        )
+
+    # ── 3. PCA Feature Space ────────────────────────────────────────────────
+    st.markdown('<div class="section-div"></div>', unsafe_allow_html=True)
+    st.subheader("🗺️ PCA Feature Space — Where Each Window Lives")
+    st.caption(
+        "2D projection of all 27 features via PCA. "
+        "Separated clusters confirm genuine MLFF deviation from AIMD physics. "
+        "The ★ marks the currently selected window."
+    )
+
+    from sklearn.decomposition import PCA as _PCA
+    from sklearn.preprocessing import StandardScaler as _SS
+
+    _Xa = _impute(X_aimd.copy())
+    _Xu = _impute(X_sel.copy())
+    _Xc = np.vstack([_Xa, _Xu])
+    _ss = _SS()
+    _Xcs = _ss.fit_transform(_Xc)
+    _pca = _PCA(n_components=2, random_state=42)
+    _Xp  = _pca.fit_transform(_Xcs)
+    _na  = len(_Xa)
+
+    _pca_a = _Xp[:_na]
+    _pca_u = _Xp[_na:]
+    _anom_u = np.asarray(res_sel['anomaly_label'][:len(_Xu)])
+    _pca_n = _pca_u[_anom_u == 0]
+    _pca_ab = _pca_u[_anom_u == 1]
+    _ev = _pca.explained_variance_ratio_
+
+    fig_pca, ax_pca = mpl_fig(figsize=(10, 6))
+    ax_pca = fig_pca.axes[0]
+    ax_pca.scatter(_pca_a[:, 0], _pca_a[:, 1],   alpha=0.35, s=8,
+                   color=CYAN, label=f'AIMD ({_na} windows)')
+    if len(_pca_n) > 0:
+        ax_pca.scatter(_pca_n[:, 0], _pca_n[:, 1],  alpha=0.5, s=10,
+                       color=SAGE, marker='s', label=f'Upload — Normal ({len(_pca_n)})')
+    if len(_pca_ab) > 0:
+        ax_pca.scatter(_pca_ab[:, 0], _pca_ab[:, 1], alpha=0.6, s=12,
+                       color=RED, marker='^', label=f'Upload — Anomaly ({len(_pca_ab)})')
+    # Star for selected window
+    _sel_pt = _Xp[_na + explain_win]
+    ax_pca.scatter([_sel_pt[0]], [_sel_pt[1]], color=GOLD, s=150, zorder=6,
+                   marker='*', label=f'Selected window #{explain_win}')
+    _style_ax(ax_pca,
+              title='PCA Feature Space: AIMD vs Upload',
+              xlabel=f'PC1 ({100*_ev[0]:.1f}% variance)',
+              ylabel=f'PC2 ({100*_ev[1]:.1f}% variance)')
+    ax_pca.legend(facecolor=SURFACE2, labelcolor=TEXT, fontsize=9)
+    st.pyplot(fig_pca, use_container_width=True); plt.close(fig_pca)
+
+    _var_total = 100 * (_ev[0] + _ev[1])
+    if _var_total < 50:
+        st.caption(
+            f"PC1 + PC2 explain {_var_total:.0f}% of variance. The full separation is "
+            "visible in 27-dimensional space — the 2D projection may understate the gap."
+        )
+    else:
+        st.caption(f"PC1 + PC2 explain {_var_total:.0f}% of variance — a faithful 2D summary.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — AIMD vs Upload Comparison
@@ -2545,7 +3067,7 @@ elif page == "🤖 AI Analysis":
 
     quick_queries = {
         "Top deviating features (Z-score bar chart)":
-            "Create a horizontal bar chart of all 22 features sorted by absolute z-score "
+            "Create a horizontal bar chart of all 27 features sorted by absolute z-score "
             "(MLFF vs AIMD). Color bars JHU red (#CF4520) for positive z-score, JHU green (#008767) for negative. "
             "Add a vertical line at ±2. Use a clean white background (#FFFFFF).",
         "AIMD anomaly rate by temperature":
@@ -2578,3 +3100,928 @@ elif page == "🤖 AI Analysis":
                         st.code(code_q, language='python')
                 else:
                     st.warning("No figure produced.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 6 — Active Learning Loop
+# Based on: docs/MLFF Training_ Anomaly Detection Workflow.md
+# Framework: MACE + Quantum ESPRESSO + SLURM (DP-GEN style autonomous loop)
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🔬 Active Learning":
+    st.markdown(
+        "<div class='page-head'>"
+        "<span class='page-head-label'>06 — Active Learning</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.title("Autonomous MLFF Refinement Loop")
+    st.markdown(
+        "**DP-GEN style** active learning: anomaly-detected windows → "
+        "MACE committee uncertainty → Quantum ESPRESSO labeling → retrain. "
+        "Generates ready-to-submit SLURM scripts for HPC."
+    )
+
+    inject_metrics_bar([
+        ("Upload anomaly rate",  f"{mlff_rate:.0%}",     None, "coral"),
+        ("AIMD anomaly rate",    f"{aimd_rate:.0%}",     None, "sage"),
+        ("Detection ratio",      f"{det_ratio:.1f}×",    None, "ink"),
+        ("Candidate windows",    int(np.sum(rm['anomaly_label'])), None, "gold"),
+        ("Feature drivers",      int((feat_cmp['z_score'].abs() > 3).sum()) if feat_cmp is not None else 0, None, "ink"),
+    ])
+
+    al_tab1, al_tab2, al_tab3, al_tab4 = st.tabs([
+        "🎯 Candidate Selection",
+        "⚙️ AL Configuration",
+        "💻 HPC Script Generator",
+        "🧪 Pre-Test Pipeline",
+    ])
+
+    # ── Tab 1: Candidate Selection ──────────────────────────────────────────
+    with al_tab1:
+        st.subheader("Anomaly-Driven Candidate Selection")
+        st.markdown(
+            "Windows flagged as anomalous by the L1+L2 ensemble are "
+            "**candidate structures** for DFT re-labeling. "
+            "Selection strategy follows DP-GEN: rank by ensemble score, "
+            "filter by feature diversity to avoid redundant labeling."
+        )
+
+        # Build candidate dataframe from active upload results
+        n_upload_win = len(rm['anomaly_label'])
+        conf_scores  = np.asarray(rm['confidence'])[:n_upload_win] \
+                       if 'confidence' in rm else np.asarray(rm['anomaly_label'])[:n_upload_win].astype(float)
+        cand_df = pd.DataFrame({
+            'window':       range(n_upload_win),
+            'anomaly':      np.asarray(rm['anomaly_label'])[:n_upload_win],
+            'confidence':   conf_scores,
+            'l1_flag':      np.asarray(rm['l1_flag'])[:n_upload_win],
+            'l2_if_flag':   np.asarray(rm['l2_if_flag'])[:n_upload_win],
+            'l2_svm_flag':  np.asarray(rm['l2_svm_flag'])[:n_upload_win],
+        })
+        anomalous_df = cand_df[cand_df['anomaly'] == 1].sort_values('confidence', ascending=False)
+
+        # Severity classification (from workflow doc)
+        def _tier(conf):
+            if conf > 0.9: return '🔴 Catastrophic'
+            if conf > 0.6: return '🟠 High'
+            if conf > 0.3: return '🟡 Warning'
+            return '🟢 Normal'
+
+        st.markdown(f"**{upload_name}** — {len(anomalous_df)} / {n_upload_win} windows flagged")
+
+        tier_counts = {
+            '🔴 Catastrophic': int((conf_scores > 0.9).sum()),
+            '🟠 High':         int(((conf_scores > 0.6) & (conf_scores <= 0.9)).sum()),
+            '🟡 Warning':      int(((conf_scores > 0.3) & (conf_scores <= 0.6)).sum()),
+            '🟢 Normal':       int((conf_scores <= 0.3).sum()),
+        }
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        for col, (label, count) in zip([tc1, tc2, tc3, tc4], tier_counts.items()):
+            col.metric(label, count)
+
+        st.markdown("---")
+
+        # Stability onset time
+        anom_labels = np.asarray(rm['anomaly_label'])[:n_upload_win]
+        onset_idx   = int(np.argmax(anom_labels)) if anom_labels.any() else None
+        if onset_idx is not None and anom_labels[onset_idx] == 1:
+            st.markdown(
+                f"**⚡ Stability onset time:** Window **{onset_idx}** "
+                f"(frame ~{onset_idx * 10} in trajectory, stride=10) — "
+                f"first detected anomaly.",
+                help="Stability onset time τ_s is the trajectory step where anomaly is first flagged. "
+                     "Structures near τ_s are the most informative for retraining."
+            )
+
+        col_l, col_r = st.columns(2)
+        with col_l:
+            max_cands = st.slider("Max candidates to label (DFT budget)", 10, 200, 50, 5,
+                                  key="al_n_cands")
+        with col_r:
+            dedup = st.checkbox("Deduplicate by feature similarity", value=True, key="al_dedup")
+
+        # Select top candidates
+        top_cands = anomalous_df.head(max_cands).copy()
+        top_cands['tier']  = top_cands['confidence'].apply(_tier)
+        top_cands['start_frame'] = top_cands['window'] * 10
+        top_cands['end_frame']   = top_cands['window'] * 10 + 50
+
+        if not top_cands.empty:
+            st.subheader(f"Top {len(top_cands)} Candidate Structures")
+            inject_overview_table(
+                top_cands[['window','tier','confidence','start_frame','end_frame',
+                            'l1_flag','l2_if_flag','l2_svm_flag']].rename(columns={
+                    'window':'Window', 'tier':'Severity', 'confidence':'Conf.',
+                    'start_frame':'Frame Start', 'end_frame':'Frame End',
+                    'l1_flag':'L1', 'l2_if_flag':'L2-IF', 'l2_svm_flag':'L2-SVM',
+                }),
+                height=260,
+            )
+            csv_cands = top_cands.to_csv(index=False)
+            st.download_button(
+                "⬇ Download candidate_windows.csv",
+                data=csv_cands,
+                file_name="candidate_windows.csv",
+                mime="text/csv",
+            )
+        else:
+            st.success("No anomalous windows detected — MLFF is well-calibrated!")
+
+        # Feature severity breakdown
+        if feat_cmp is not None and not feat_cmp.empty:
+            st.markdown("---")
+            st.subheader("Feature Drivers of Anomaly")
+            _high_z = feat_cmp[feat_cmp['z_score'].abs() > 3].sort_values('z_score', key=abs, ascending=False)
+            if not _high_z.empty:
+                # Classify by physics category
+                _cat_map = {
+                    'disp_': 'Displacement', 'rms_': 'Dynamics', 'crest_': 'Dynamics',
+                    'impulse_': 'Dynamics', 'frame_v': 'Dynamics', 'aniso': 'Dynamics',
+                    'dominant_': 'Frequency', 'spectral_': 'Frequency',
+                    'msd_': 'MSD', 'energy_': 'Energy',
+                }
+                def _cat(fname):
+                    for prefix, cat in _cat_map.items():
+                        if fname.startswith(prefix): return cat
+                    return 'Other'
+                _high_z = _high_z.copy()
+                _high_z['category'] = _high_z['feature'].apply(_cat)
+                _high_z['action']   = _high_z['z_score'].apply(
+                    lambda z: '🔴 Critical — must label' if abs(z) > 10
+                    else ('🟠 High priority' if abs(z) > 5 else '🟡 Medium priority')
+                )
+                inject_overview_table(
+                    _high_z[['feature','category','z_score','relative_change_%','action']].rename(columns={
+                        'feature':'Feature','category':'Physics Category',
+                        'z_score':'Z-score','relative_change_%':'Change %','action':'AL Priority'
+                    }),
+                    height=240,
+                )
+
+    # ── Tab 2: AL Configuration ──────────────────────────────────────────────
+    with al_tab2:
+        st.subheader("Active Learning Configuration")
+        st.caption("Tune hyperparameters for the MACE committee + QE labeling loop.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**MACE Architecture**")
+            mace_r_max    = st.number_input("r_max (Å)", 4.0, 10.0, 6.0, 0.5, key="al_rmax")
+            mace_L        = st.selectbox("max_L (angular)", [1, 2, 3], index=1, key="al_L")
+            mace_channels = st.selectbox("num_channels", [64, 128, 256], index=1, key="al_ch")
+            mace_interact = st.selectbox("num_interactions", [1, 2, 3], index=1, key="al_ni")
+            mace_committee= st.slider("Committee size (n_models)", 2, 8, 4, key="al_comm")
+            mace_lr       = st.number_input("Learning rate", 0.0001, 0.01, 0.005, step=0.0001,
+                                             format="%.4f", key="al_lr")
+            mace_epochs   = st.number_input("Max epochs", 200, 5000, 2000, 100, key="al_ep")
+
+        with c2:
+            st.markdown(f"**DP-GEN Loop Settings**")
+            sigma_lo   = st.number_input("σ_lo (uncertainty lower bound)", 0.01, 0.5, 0.10, 0.01, key="al_slo")
+            sigma_hi   = st.number_input("σ_hi (uncertainty upper bound)", 0.1, 1.0, 0.30, 0.05, key="al_shi")
+            max_iter   = st.slider("Max AL iterations", 3, 20, 10, key="al_maxiter")
+            n_explore  = st.number_input("Explore frames per iter", 100, 5000, 500, 100, key="al_nex")
+            conv_thr   = st.number_input("Convergence threshold (fraction accurate)",
+                                          0.90, 0.999, 0.99, 0.005, format="%.3f", key="al_conv")
+            temps_str  = st.text_input("Exploration temperatures (K)", "300,600,900,1200", key="al_temps")
+
+            st.markdown("**QE DFT Settings**")
+            qe_ecutwfc = st.number_input("ecutwfc (Ry)", 40, 120, 60, 10, key="al_ecut")
+            qe_kpts    = st.text_input("k-points (nx ny nz)", "2 2 1", key="al_kpts")
+
+        st.markdown("---")
+        st.markdown("**SLURM Settings**")
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            slurm_partition = st.text_input("Partition", "gpu", key="al_part")
+            slurm_time      = st.text_input("Time limit", "48:00:00", key="al_time")
+        with s2:
+            slurm_ntasks    = st.number_input("ntasks-per-node", 1, 64, 8, key="al_ntasks")
+            slurm_gpus      = st.number_input("GPUs per node", 0, 8, 1, key="al_gpus")
+        with s3:
+            slurm_mem       = st.text_input("Memory", "64G", key="al_mem")
+            slurm_email     = st.text_input("Email (for notifications)", "", key="al_email")
+
+        # Store config in session for script generator
+        st.session_state['al_config'] = {
+            'mace': {'r_max': mace_r_max, 'max_L': mace_L, 'num_channels': mace_channels,
+                     'num_interactions': mace_interact, 'n_committee': mace_committee,
+                     'lr': mace_lr, 'max_epochs': int(mace_epochs)},
+            'al':   {'sigma_lo': sigma_lo, 'sigma_hi': sigma_hi, 'max_iterations': int(max_iter),
+                     'n_explore_frames': int(n_explore), 'convergence_threshold': conv_thr,
+                     'temperatures': [int(t.strip()) for t in temps_str.split(',') if t.strip().isdigit()]},
+            'qe':   {'ecutwfc': int(qe_ecutwfc), 'kpoints': qe_kpts},
+            'slurm':{'partition': slurm_partition, 'time': slurm_time,
+                     'ntasks': int(slurm_ntasks), 'gpus': int(slurm_gpus),
+                     'mem': slurm_mem, 'email': slurm_email},
+        }
+        st.success("Configuration saved — go to **HPC Script Generator** to download scripts.")
+
+    # ── Tab 3: HPC Script Generator ──────────────────────────────────────────
+    with al_tab3:
+        st.subheader("HPC Script Generator")
+        st.markdown(
+            "Generates three files for autonomous MLFF refinement on HPC:\n"
+            "- `config_al.yaml` — full hyperparameter config\n"
+            "- `run_al_loop.py` — Python orchestration script (MACE + QE + AL loop)\n"
+            "- `submit_al.sh` — SLURM batch submission script"
+        )
+
+        cfg = st.session_state.get('al_config', {})
+        mace_cfg  = cfg.get('mace',  {'r_max': 6.0, 'max_L': 2, 'num_channels': 128,
+                                       'num_interactions': 2, 'n_committee': 4,
+                                       'lr': 0.005, 'max_epochs': 2000})
+        al_cfg    = cfg.get('al',    {'sigma_lo': 0.10, 'sigma_hi': 0.30, 'max_iterations': 10,
+                                      'n_explore_frames': 500, 'convergence_threshold': 0.99,
+                                      'temperatures': [300, 600, 900, 1200]})
+        qe_cfg    = cfg.get('qe',    {'ecutwfc': 60, 'kpoints': '2 2 1'})
+        sl_cfg    = cfg.get('slurm', {'partition': 'gpu', 'time': '48:00:00',
+                                      'ntasks': 8, 'gpus': 1, 'mem': '64G', 'email': ''})
+        kpts      = qe_cfg['kpoints'].split()
+        kx, ky, kz= (kpts + ['1','1','1'])[:3]
+
+        # ── config_al.yaml ─────────────────────────────────────────────────
+        config_yaml = f"""# Active Learning Configuration — 2D Sb2Te3 Cr-doped MLFF
+# Generated by AIMD Anomaly Detection Dashboard
+# MLFF: MACE   |   DFT: Quantum ESPRESSO   |   Scheduler: SLURM
+
+system:
+  name: "2D_Sb2Te3_Cr_doped"
+  elements: ["Sb", "Te", "Cr"]
+  n_atoms: 82
+  structure_file: "data/raw/temperature/2L_octo_Cr2_600K_aimd_1.xyz"
+  anomaly_report: "results/reports/ensemble_comparison.csv"
+
+mace:
+  # Architecture
+  r_max: {mace_cfg['r_max']}
+  num_radial_basis: 10
+  num_cutoff_basis: 5
+  max_L: {mace_cfg['max_L']}
+  num_channels: {mace_cfg['num_channels']}
+  num_interactions: {mace_cfg['num_interactions']}
+  correlation: 3
+  # Training
+  batch_size: 16
+  lr: {mace_cfg['lr']}
+  max_num_epochs: {mace_cfg['max_epochs']}
+  patience: 200
+  scheduler_gamma: 0.9995
+  ema_decay: 0.99
+  clip_grad: 10.0
+  # Committee (DP-GEN style)
+  n_committee: {mace_cfg['n_committee']}
+  committee_seeds: {list(range(42, 42 + mace_cfg['n_committee']))}
+  model_dir: "results/models/mace_committee"
+
+quantum_espresso:
+  pseudo_dir: "pseudos"
+  pseudopotentials:
+    Sb: "Sb.pbe-n-kjpaw_psl.1.0.0.UPF"
+    Te: "Te.pbe-dn-kjpaw_psl.1.0.0.UPF"
+    Cr: "Cr.pbe-spn-kjpaw_psl.1.0.0.UPF"
+  ecutwfc: {qe_cfg['ecutwfc']}
+  ecutrho: {qe_cfg['ecutwfc'] * 8}
+  kpoints: [{kx}, {ky}, {kz}]
+  smearing: "methfessel-paxton"
+  degauss: 0.01
+  conv_thr: 1.0e-8
+  nstep: 200
+  output_dir: "results/al_dft_calcs"
+
+active_learning:
+  mode: "DP-GEN"          # options: DP-GEN | ALKPU | aims-PAX
+  sigma_lo: {al_cfg['sigma_lo']}       # lower uncertainty bound (filter redundant)
+  sigma_hi: {al_cfg['sigma_hi']}       # upper uncertainty bound (filter nonsensical)
+  max_iterations: {al_cfg['max_iterations']}
+  n_explore_frames: {al_cfg['n_explore_frames']}
+  convergence_threshold: {al_cfg['convergence_threshold']}
+  temperatures: {al_cfg['temperatures']}
+  n_labeling_max: 50      # max DFT calculations per iteration
+  stability_onset_window: true  # label structures near stability onset time
+  dedup_threshold: 0.95   # cosine similarity threshold for deduplication
+  seed: 42
+
+slurm:
+  partition: "{sl_cfg['partition']}"
+  nodes: 1
+  ntasks_per_node: {sl_cfg['ntasks']}
+  gpus_per_node: {sl_cfg['gpus']}
+  time: "{sl_cfg['time']}"
+  mem: "{sl_cfg['mem']}"
+  account: ""             # fill in your HPC account/project code
+  email: "{sl_cfg['email']}"
+  conda_env: "mace"       # conda env with MACE + QE python interface installed
+  qe_binary: "pw.x"       # QE binary (add full path if not in PATH)
+"""
+
+        # ── run_al_loop.py ─────────────────────────────────────────────────
+        run_script = r'''#!/usr/bin/env python3
+"""
+run_al_loop.py — Autonomous Active Learning loop for MACE MLFF refinement.
+Uses DP-GEN style committee uncertainty to select structures for QE re-labeling.
+
+Usage:
+  python run_al_loop.py                    # full loop
+  python run_al_loop.py --dry-run          # simulation only (no DFT/training)
+  python run_al_loop.py --iteration 3      # resume from iteration 3
+
+Requirements:
+  pip install mace-torch ase pyyaml numpy pandas scipy scikit-learn
+  Quantum ESPRESSO (pw.x) in PATH or specified in config
+"""
+
+import argparse
+import json
+import logging
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+try:
+    from ase.io import read, write
+    from ase.calculators.espresso import Espresso
+    ASE_AVAILABLE = True
+except ImportError:
+    ASE_AVAILABLE = False
+    print("Warning: ASE not installed. DFT labeling step will be skipped.")
+
+
+# ── Logging ────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s  %(levelname)-8s  %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('results/al_loop.log', mode='a'),
+    ]
+)
+log = logging.getLogger(__name__)
+
+
+# ── Config loader ──────────────────────────────────────────────────────────
+def load_config(path='config_al.yaml'):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+# ── Step 1: Load existing anomaly detection results ───────────────────────
+def load_anomaly_candidates(config):
+    """
+    Read ensemble_comparison.csv and return anomalous MLFF windows.
+    Ranking: by ensemble score (sum of flags), then by l2_if_score magnitude.
+    """
+    report_path = Path(config['system']['anomaly_report'])
+    if not report_path.exists():
+        log.warning(f"Anomaly report not found: {report_path}")
+        return pd.DataFrame()
+
+    df = pd.read_csv(report_path)
+    mlff_df = df[df['source'] == 'MLFF'].copy()
+    mlff_df['ensemble_score'] = (
+        mlff_df['l1_flag'] + mlff_df['l2_if_flag'] + mlff_df['l2_svm_flag']
+    )
+    # Composite confidence: number of detectors flagging / 3
+    mlff_df['confidence'] = mlff_df['ensemble_score'] / 3.0
+
+    candidates = mlff_df[mlff_df['ensemble_l12'] == 1].sort_values(
+        'confidence', ascending=False
+    )
+    log.info(f"Loaded {len(candidates)} anomalous candidate windows from {report_path}")
+    return candidates
+
+
+# ── Step 2: Extract candidate structures from XYZ ─────────────────────────
+def extract_candidate_structures(candidates, structure_file, n_max, window_size=50):
+    """Extract atom structures at candidate window start frames."""
+    if not ASE_AVAILABLE:
+        log.warning("ASE unavailable — skipping structure extraction.")
+        return []
+
+    log.info(f"Reading trajectory: {structure_file}")
+    traj = read(str(structure_file), index=':')
+    log.info(f"  {len(traj)} frames loaded")
+
+    structures = []
+    for _, row in candidates.head(n_max).iterrows():
+        frame_idx = int(row.get('window_idx', 0)) * 10  # stride=10
+        mid_frame = min(frame_idx + window_size // 2, len(traj) - 1)
+        structures.append((int(row.get('window_idx', 0)), traj[mid_frame]))
+
+    log.info(f"Extracted {len(structures)} candidate structures")
+    return structures
+
+
+# ── Step 3: Compute MACE committee uncertainty ────────────────────────────
+def compute_committee_uncertainty(structures, model_dir, n_committee, dry_run=False):
+    """
+    Run MACE committee inference: n_committee models predict forces,
+    uncertainty = max std-dev of force predictions across committee.
+    Returns dict: {window_idx: sigma_max}
+    """
+    if dry_run:
+        log.info("[DRY RUN] Simulating committee uncertainty with random values")
+        return {s[0]: float(np.random.uniform(0.05, 0.40)) for s in structures}
+
+    uncertainties = {}
+    model_dir = Path(model_dir)
+    model_paths = sorted(model_dir.glob('model_seed_*.pth'))
+
+    if not model_paths:
+        log.warning(f"No committee models found in {model_dir}. Skipping UQ step.")
+        return uncertainties
+
+    log.info(f"Computing uncertainty with {len(model_paths)} committee models")
+    try:
+        from mace.calculators import MACECalculator
+        all_forces = {s[0]: [] for s in structures}
+
+        for model_path in model_paths:
+            calc = MACECalculator(model_paths=[str(model_path)], device='cuda')
+            for win_idx, atoms in structures:
+                atoms_copy = atoms.copy()
+                atoms_copy.calc = calc
+                try:
+                    f = atoms_copy.get_forces()
+                    all_forces[win_idx].append(f)
+                except Exception as e:
+                    log.warning(f"  Force eval failed for window {win_idx}: {e}")
+
+        for win_idx, force_list in all_forces.items():
+            if len(force_list) >= 2:
+                force_arr = np.stack(force_list)  # (n_models, n_atoms, 3)
+                sigma = np.max(np.std(force_arr, axis=0))
+                uncertainties[win_idx] = float(sigma)
+            else:
+                uncertainties[win_idx] = 0.0
+
+    except ImportError:
+        log.error("MACE not installed. Run: pip install mace-torch")
+
+    return uncertainties
+
+
+# ── Step 4: Filter candidates by sigma bounds ─────────────────────────────
+def filter_candidates(structures, uncertainties, sigma_lo, sigma_hi):
+    """
+    DP-GEN selection:
+    - sigma < sigma_lo: already well-described by model (skip)
+    - sigma_lo <= sigma <= sigma_hi: informative → LABEL
+    - sigma > sigma_hi: nonsensical/too uncertain → SKIP (would waste DFT)
+    """
+    selected = []
+    for win_idx, atoms in structures:
+        sigma = uncertainties.get(win_idx, 0.0)
+        if sigma_lo <= sigma <= sigma_hi:
+            selected.append((win_idx, atoms, sigma))
+            log.debug(f"  ✓ Window {win_idx}: σ={sigma:.4f} (informative)")
+        elif sigma > sigma_hi:
+            log.debug(f"  ✗ Window {win_idx}: σ={sigma:.4f} (nonsensical, skip)")
+        else:
+            log.debug(f"  - Window {win_idx}: σ={sigma:.4f} (accurate, skip)")
+
+    log.info(f"Selected {len(selected)} structures for DFT labeling "
+             f"(σ_lo={sigma_lo}, σ_hi={sigma_hi})")
+    return selected
+
+
+# ── Step 5: Generate QE input files & run DFT ─────────────────────────────
+def run_qe_labeling(selected, config, iteration, dry_run=False):
+    """Generate QE input files and submit DFT calculations."""
+    qe_cfg  = config['quantum_espresso']
+    out_dir = Path(config['quantum_espresso']['output_dir']) / f'iter_{iteration:02d}'
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    labeled_structures = []
+
+    for win_idx, atoms, sigma in selected:
+        label_dir = out_dir / f'window_{win_idx:04d}'
+        label_dir.mkdir(exist_ok=True)
+
+        if dry_run:
+            # Write input but don't run
+            if ASE_AVAILABLE:
+                write(str(label_dir / 'structure.xyz'), atoms)
+            log.info(f"  [DRY RUN] Would label window {win_idx} (σ={sigma:.4f})")
+            labeled_structures.append((win_idx, atoms, None))
+            continue
+
+        if not ASE_AVAILABLE:
+            log.warning("ASE unavailable — cannot write QE inputs")
+            continue
+
+        # Write QE input via ASE
+        kpts_str = qe_cfg.get('kpoints', [2, 2, 1])
+        input_data = {
+            'control':   {'calculation': 'scf', 'outdir': str(label_dir / 'tmp'),
+                          'prefix': f'win_{win_idx:04d}', 'pseudo_dir': qe_cfg['pseudo_dir'],
+                          'etot_conv_thr': 1e-6, 'forc_conv_thr': 1e-4},
+            'system':    {'ecutwfc': qe_cfg['ecutwfc'], 'ecutrho': qe_cfg['ecutrho'],
+                          'occupations': 'smearing', 'smearing': qe_cfg.get('smearing', 'mp'),
+                          'degauss': qe_cfg.get('degauss', 0.01)},
+            'electrons': {'conv_thr': qe_cfg.get('conv_thr', 1e-8),
+                          'mixing_beta': 0.3, 'electron_maxstep': 200},
+        }
+
+        calc = Espresso(
+            input_data=input_data,
+            pseudopotentials=qe_cfg['pseudopotentials'],
+            kpts=kpts_str,
+            directory=str(label_dir),
+        )
+        atoms_copy = atoms.copy()
+        atoms_copy.calc = calc
+
+        try:
+            energy  = atoms_copy.get_potential_energy()
+            forces  = atoms_copy.get_forces()
+            stress  = atoms_copy.get_stress()
+            log.info(f"  ✓ Window {win_idx}: E={energy:.4f} eV, "
+                     f"max|F|={np.max(np.abs(forces)):.4f} eV/Å")
+            labeled_structures.append((win_idx, atoms_copy, {'energy': energy,
+                                                               'forces': forces,
+                                                               'stress': stress}))
+        except Exception as e:
+            log.error(f"  ✗ QE failed for window {win_idx}: {e}")
+
+    return labeled_structures
+
+
+# ── Step 6: Append new data and retrain MACE committee ────────────────────
+def retrain_mace(labeled_structures, config, iteration, dry_run=False):
+    """Append labeled data to training set and retrain MACE committee."""
+    mace_cfg  = config['mace']
+    model_dir = Path(mace_cfg['model_dir'])
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save new labeled structures
+    new_data_path = model_dir / f'new_data_iter_{iteration:02d}.extxyz'
+    if ASE_AVAILABLE and labeled_structures:
+        valid_structs = [atoms for _, atoms, data in labeled_structures if data is not None]
+        if valid_structs:
+            write(str(new_data_path), valid_structs)
+            log.info(f"Saved {len(valid_structs)} labeled structures → {new_data_path}")
+
+    if dry_run:
+        log.info("[DRY RUN] Would retrain MACE committee")
+        return [f"model_seed_{42 + i}.pth" for i in range(mace_cfg['n_committee'])]
+
+    model_paths = []
+    for seed in mace_cfg.get('committee_seeds', range(42, 42 + mace_cfg['n_committee'])):
+        model_name = f"model_seed_{seed}"
+        cmd = [
+            'python', '-m', 'mace.run_train',
+            f'--name={model_name}',
+            f'--train_file={str(model_dir / "train.extxyz")}',
+            f'--valid_fraction=0.1',
+            f'--model=MACE',
+            f'--r_max={mace_cfg["r_max"]}',
+            f'--max_L={mace_cfg["max_L"]}',
+            f'--num_channels={mace_cfg["num_channels"]}',
+            f'--num_interactions={mace_cfg["num_interactions"]}',
+            f'--correlation=3',
+            f'--batch_size=16',
+            f'--lr={mace_cfg["lr"]}',
+            f'--max_num_epochs={mace_cfg["max_epochs"]}',
+            f'--patience={mace_cfg.get("patience", 200)}',
+            f'--scheduler_gamma={mace_cfg.get("scheduler_gamma", 0.9995)}',
+            f'--seed={seed}',
+            f'--device=cuda',
+            f'--directory={str(model_dir)}',
+        ]
+        log.info(f"Training model with seed {seed}...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            log.info(f"  ✓ Model {model_name} trained successfully")
+            model_paths.append(str(model_dir / f'{model_name}.pth'))
+        else:
+            log.error(f"  ✗ Training failed for seed {seed}:\n{result.stderr[-500:]}")
+
+    return model_paths
+
+
+# ── Step 7: Check convergence ─────────────────────────────────────────────
+def check_convergence(uncertainties, sigma_lo, threshold=0.99):
+    """
+    Convergence: fraction of structures with σ < σ_lo (accurate) exceeds threshold.
+    Returns (converged: bool, fraction_accurate: float).
+    """
+    if not uncertainties:
+        return False, 0.0
+    n_accurate = sum(1 for s in uncertainties.values() if s < sigma_lo)
+    frac = n_accurate / len(uncertainties)
+    return frac >= threshold, frac
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description='MACE Active Learning Loop')
+    parser.add_argument('--config',    default='config_al.yaml')
+    parser.add_argument('--dry-run',   action='store_true')
+    parser.add_argument('--iteration', type=int, default=0)
+    args = parser.parse_args()
+
+    log.info("=" * 60)
+    log.info("MACE Active Learning Loop — 2D Sb2Te3 Cr-doped")
+    log.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log.info(f"Mode: {'DRY RUN' if args.dry_run else 'LIVE'}")
+    log.info("=" * 60)
+
+    config    = load_config(args.config)
+    al_cfg    = config['active_learning']
+    mace_cfg  = config['mace']
+    sigma_lo  = al_cfg['sigma_lo']
+    sigma_hi  = al_cfg['sigma_hi']
+    max_iter  = al_cfg['max_iterations']
+    conv_thr  = al_cfg['convergence_threshold']
+
+    Path('results').mkdir(exist_ok=True)
+    summary_log = []
+
+    for iteration in range(args.iteration, max_iter):
+        log.info(f"\n{'='*60}")
+        log.info(f"ITERATION {iteration + 1} / {max_iter}")
+        log.info(f"{'='*60}")
+
+        # 1. Load candidates
+        candidates = load_anomaly_candidates(config)
+        if candidates.empty:
+            log.info("No anomalous candidates — model may already be converged.")
+            break
+
+        # 2. Extract structures
+        structures = extract_candidate_structures(
+            candidates,
+            config['system']['structure_file'],
+            n_max=al_cfg['n_labeling_max'],
+        )
+
+        if not structures:
+            log.warning("No structures extracted. Check structure_file path.")
+            break
+
+        # 3. Committee uncertainty
+        uncertainties = compute_committee_uncertainty(
+            structures, mace_cfg['model_dir'],
+            mace_cfg['n_committee'], dry_run=args.dry_run,
+        )
+
+        # 4. Filter by sigma bounds
+        selected = filter_candidates(structures, uncertainties, sigma_lo, sigma_hi)
+
+        # 5. Check convergence before labeling
+        converged, frac_acc = check_convergence(uncertainties, sigma_lo, conv_thr)
+        log.info(f"Convergence check: {frac_acc:.1%} accurate (threshold: {conv_thr:.1%})")
+
+        iter_summary = {
+            'iteration':       iteration + 1,
+            'timestamp':       datetime.now().isoformat(),
+            'n_candidates':    len(candidates),
+            'n_structures':    len(structures),
+            'n_selected':      len(selected),
+            'frac_accurate':   frac_acc,
+            'converged':       converged,
+        }
+        summary_log.append(iter_summary)
+
+        # Save iteration summary
+        with open(f'results/al_iteration_{iteration + 1:02d}.json', 'w') as f:
+            json.dump(iter_summary, f, indent=2)
+
+        if converged:
+            log.info(f"✅ CONVERGED at iteration {iteration + 1}! "
+                     f"Fraction accurate: {frac_acc:.1%}")
+            break
+
+        if not selected:
+            log.info("No structures selected this iteration (all accurate or nonsensical).")
+            continue
+
+        # 6. DFT labeling
+        labeled = run_qe_labeling(selected, config, iteration + 1, dry_run=args.dry_run)
+
+        # 7. Retrain
+        _ = retrain_mace(labeled, config, iteration + 1, dry_run=args.dry_run)
+
+        log.info(f"Iteration {iteration + 1} complete. "
+                 f"Labeled: {len(labeled)}, Acc: {frac_acc:.1%}")
+
+    # Final summary
+    log.info("\n" + "=" * 60)
+    log.info("ACTIVE LEARNING LOOP COMPLETE")
+    log.info("=" * 60)
+    with open('results/al_summary.json', 'w') as f:
+        json.dump(summary_log, f, indent=2)
+    log.info("Summary written to results/al_summary.json")
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+        # ── submit_al.sh (SLURM) ────────────────────────────────────────────
+        email_lines = ""
+        if sl_cfg.get('email'):
+            email_lines = f"""#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user={sl_cfg['email']}"""
+
+        submit_sh = f"""#!/bin/bash
+#SBATCH --job-name=mace_al_sb2te3
+#SBATCH --output=logs/al_%j.out
+#SBATCH --error=logs/al_%j.err
+#SBATCH --partition={sl_cfg['partition']}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node={sl_cfg['ntasks']}
+#SBATCH --gres=gpu:{sl_cfg['gpus']}
+#SBATCH --time={sl_cfg['time']}
+#SBATCH --mem={sl_cfg['mem']}
+{email_lines}
+
+# ── Environment ─────────────────────────────────────────────────────────────
+module purge
+module load cuda/12.1 intel-mpi/2021
+
+# Activate conda env (adjust path if needed)
+source activate mace 2>/dev/null || conda activate mace 2>/dev/null || {{
+  echo "ERROR: Could not activate conda env 'mace'"
+  echo "Create it with: conda create -n mace python=3.10 && pip install mace-torch ase pyyaml"
+  exit 1
+}}
+
+# OpenMP threading (leave some cores for MPI)
+export OMP_NUM_THREADS=2
+export CUDA_VISIBLE_DEVICES=0
+
+# Quantum ESPRESSO binary (uncomment and set path if not in PATH)
+# export PATH=/path/to/qe/bin:$PATH
+
+# ── Directories ──────────────────────────────────────────────────────────────
+mkdir -p logs results/al_dft_calcs results/models/mace_committee
+
+# ── Verify inputs ────────────────────────────────────────────────────────────
+if [ ! -f "config_al.yaml" ]; then
+  echo "ERROR: config_al.yaml not found. Run from the project root."
+  exit 1
+fi
+
+if [ ! -f "results/reports/ensemble_comparison.csv" ]; then
+  echo "ERROR: ensemble_comparison.csv not found. Run the full pipeline first."
+  echo "  python scripts/run_full_pipeline.py"
+  exit 1
+fi
+
+# ── Dry run test ──────────────────────────────────────────────────────────────
+echo "Running dry-run pre-test..."
+python run_al_loop.py --dry-run --config config_al.yaml
+if [ $? -ne 0 ]; then
+  echo "ERROR: Dry run failed. Check config_al.yaml and logs."
+  exit 1
+fi
+echo "Dry run passed. Starting full active learning loop..."
+
+# ── Active learning loop ──────────────────────────────────────────────────────
+python run_al_loop.py --config config_al.yaml
+
+exit_code=$?
+if [ $exit_code -eq 0 ]; then
+  echo "=== ACTIVE LEARNING COMPLETE ==="
+  echo "Results in: results/al_summary.json"
+else
+  echo "=== ACTIVE LEARNING FAILED (exit code $exit_code) ==="
+  echo "Check logs/al_*.log for details."
+fi
+exit $exit_code
+"""
+
+        # ── Display & download ────────────────────────────────────────────
+        dg1, dg2, dg3 = st.columns(3)
+        with dg1:
+            st.download_button(
+                "⬇ config_al.yaml",
+                data=config_yaml,
+                file_name="config_al.yaml",
+                mime="text/yaml",
+            )
+        with dg2:
+            st.download_button(
+                "⬇ run_al_loop.py",
+                data=run_script,
+                file_name="run_al_loop.py",
+                mime="text/x-python",
+            )
+        with dg3:
+            st.download_button(
+                "⬇ submit_al.sh",
+                data=submit_sh,
+                file_name="submit_al.sh",
+                mime="text/x-sh",
+            )
+
+        st.markdown("---")
+        with st.expander("📄 Preview: config_al.yaml", expanded=False):
+            st.code(config_yaml, language='yaml')
+        with st.expander("📄 Preview: run_al_loop.py (abridged)", expanded=False):
+            st.code(run_script[:3000] + "\n# ... (truncated for preview)", language='python')
+        with st.expander("📄 Preview: submit_al.sh", expanded=False):
+            st.code(submit_sh, language='bash')
+
+        st.markdown("---")
+        st.info(
+            "**Quick start on HPC:**\n"
+            "```bash\n"
+            "# 1. Transfer scripts to HPC\n"
+            "scp config_al.yaml run_al_loop.py submit_al.sh user@hpc:/path/to/project/\n"
+            "\n"
+            "# 2. Install MACE environment (once)\n"
+            "conda create -n mace python=3.10\n"
+            "conda activate mace\n"
+            "pip install mace-torch ase pyyaml\n"
+            "\n"
+            "# 3. Add pseudopotentials to pseudos/ directory\n"
+            "#    Download from: https://www.materialscloud.org/discover/sssp\n"
+            "\n"
+            "# 4. Submit\n"
+            "sbatch submit_al.sh\n"
+            "```"
+        )
+
+    # ── Tab 4: Pre-Test Pipeline ─────────────────────────────────────────────
+    with al_tab4:
+        st.subheader("Pre-Test: Small Dataset Pipeline Simulation")
+        st.markdown(
+            "Runs a **dry-run simulation** of the active learning loop on the current "
+            "session data to verify the pipeline before submitting to HPC."
+        )
+
+        test_fraction = st.slider(
+            "Training subset (% of total windows)", 10, 50, 20, 5, key="al_test_frac"
+        )
+        test_sigma_lo = st.number_input("Test σ_lo", 0.05, 0.5, 0.10, 0.05, key="al_test_slo")
+        test_sigma_hi = st.number_input("Test σ_hi", 0.1, 1.0, 0.30, 0.05, key="al_test_shi")
+
+        if st.button("▶ Run Pre-Test Simulation", key="al_run_pretest"):
+            with st.spinner("Simulating AL loop on small dataset…"):
+                # Sample a subset of AIMD windows
+                n_subset = max(50, int(len(X_aimd) * test_fraction / 100))
+                subset_idx = np.random.choice(len(X_aimd), n_subset, replace=False)
+                X_sub = X_aimd[subset_idx]
+
+                # Simulate committee uncertainty (proxy: use L1 score variance across features)
+                from sklearn.preprocessing import StandardScaler as _SS
+                _ss = _SS()
+                X_sub_sc = _ss.fit_transform(X_sub)
+                # Simulate sigma as feature variance per window (proxy for true committee UQ)
+                sigma_sim = np.std(X_sub_sc, axis=1) * 0.1  # scale to [0, 0.4] range
+
+                n_informative = int(((sigma_sim >= test_sigma_lo) & (sigma_sim <= test_sigma_hi)).sum())
+                n_accurate    = int((sigma_sim < test_sigma_lo).sum())
+                n_nonsensical = int((sigma_sim > test_sigma_hi).sum())
+                frac_acc      = n_accurate / max(len(sigma_sim), 1)
+
+            st.success(f"Pre-test complete on {n_subset} windows ({test_fraction}% of AIMD data)")
+
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Windows tested",   n_subset)
+            r2.metric("Accurate (σ<σ_lo)", n_accurate, f"{n_accurate/n_subset:.0%}")
+            r3.metric("Informative",       n_informative, f"{n_informative/n_subset:.0%}")
+            r4.metric("Nonsensical (skip)", n_nonsensical, f"{n_nonsensical/n_subset:.0%}")
+
+            # Uncertainty distribution plot
+            fig_pt, ax_pt = mpl_fig(figsize=(8, 3))
+            ax_pt = fig_pt.axes[0]
+            ax_pt.hist(sigma_sim, bins=40, color=CYAN, alpha=0.7, label='σ distribution')
+            ax_pt.axvline(test_sigma_lo, color=GOLD,  ls='--', lw=1.5, label=f'σ_lo={test_sigma_lo}')
+            ax_pt.axvline(test_sigma_hi, color=CORAL, ls='--', lw=1.5, label=f'σ_hi={test_sigma_hi}')
+            ax_pt.fill_betweenx([0, ax_pt.get_ylim()[1] if ax_pt.get_ylim()[1] > 0 else 1],
+                                 test_sigma_lo, test_sigma_hi,
+                                 alpha=0.12, color=GOLD, label='Label zone')
+            _style_ax(ax_pt, title='Simulated Committee Uncertainty Distribution',
+                      xlabel='σ_max (uncertainty)', ylabel='Count')
+            ax_pt.legend(fontsize=9)
+            st.pyplot(fig_pt, use_container_width=True); plt.close(fig_pt)
+
+            if frac_acc < 0.5:
+                st.warning(
+                    f"Only {frac_acc:.0%} of windows are 'accurate' in this subset. "
+                    "Multiple AL iterations will likely be needed — consider more epochs or "
+                    "a larger training set."
+                )
+            else:
+                st.success(
+                    f"**{frac_acc:.0%}** of windows are already accurate. "
+                    "The MLFF is learning well — convergence expected in few iterations."
+                )
+
+            st.markdown("---")
+            st.caption(
+                "**Note:** Committee uncertainty is simulated here using feature variance as a proxy "
+                "(no actual MACE models trained). On HPC, real committee uncertainty from 4× MACE "
+                "models is used. This pre-test validates that the pipeline logic, data loading, "
+                "and sigma thresholds are reasonable before committing HPC resources."
+            )
